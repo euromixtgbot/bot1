@@ -1,0 +1,39 @@
+# ========================================
+# TELEGRAM BOT - ОСНОВНЫЕ ЗАВИСИМОСТИ 
+# ========================================
+# Дата: June 23, 2025
+# Python: 3.8+
+
+# Telegram Bot API
+python-telegram-bot==21.3
+
+# HTTP клиенты для API запросов
+httpx==0.27.0
+aiohttp==3.9.5
+
+# Конфигурация
+python-dotenv==1.0.1
+
+# Работа с YAML
+pyyaml==6.0.1
+
+# Google Sheets интеграция
+gspread==6.1.2
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+
+# HTTP библиотеки  
+requests==2.31.0
+
+# Асинхронность
+anyio==4.4.0
+
+# Безопасность
+certifi==2024.6.2
+
+# Утилиты
+six==1.16.0
+urllib3==2.2.2
+
+# Типизация (опционально)
+typing-extensions==4.12.2

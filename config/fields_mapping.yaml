@@ -1,0 +1,16 @@
+# fields_mapping.yaml
+
+# Стандартні поля
+project: project.key            # ключ проєкту в Jira (наприклад, SD)
+summary: summary                # Summary
+issuetype: issuetype.name       # Issue Type (наприклад, Telegram)
+description: description        # Description
+reporter: reporter.accountId    # Reporter (accountId)
+account_id: reporter.accountId  # accountId також відповідає за репортера
+
+# Кастомні поля Jira (Custom Field IDs)
+telegram_id: customfield_10145        # «Telegram ID»
+telegram_username: customfield_10146  # «Telegram @username»
+division: customfield_10069           # «Балансова Одиниця (Підрозділ)»
+department: customfield_10065         # «Departament»
+service: customfield_10068            # «Service»

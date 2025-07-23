@@ -1,0 +1,19 @@
+[tool.pyright]
+include = ["src", "config"]
+exclude = ["**/__pycache__"]
+reportMissingImports = "none"
+reportMissingTypeStubs = "none"
+reportUnknownMemberType = "none"
+reportGeneralTypeIssues = "warning"
+reportUnknownParameterType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportAttributeAccessIssue = "none"
+reportOptionalMemberAccess = "none"
+reportOptionalSubscript = "none"
+reportOptionalOperand = "none"
+reportOptionalCall = "none"
+reportOptionalIterable = "none"
+reportOptionalContextManager = "none"
+pythonVersion = "3.12"

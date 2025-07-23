@@ -1,0 +1,33 @@
+[Unit]
+Description=Telegram Bot for Jira Integration
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/Bot1
+Environment=PATH=/home/Bot1/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/Bot1/venv/bin/python /home/Bot1/src/main.py
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/Bot1/logs/bot.log
+StandardError=append:/home/Bot1/logs/bot.log
+
+# Налаштування ресурсів
+LimitNOFILE=65536
+LimitNPROC=32768
+
+# Захист системи
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/Bot1
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
