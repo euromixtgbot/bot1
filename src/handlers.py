@@ -17,7 +17,13 @@ from src.google_sheets_service import (
     update_user_telegram,
     add_new_user
 )
-from src.user_state_service import save_registration_state, load_registration_state, complete_registration
+from src.user_management_service import user_manager
+from src.user_state_service import (
+    save_registration_state, load_registration_state, complete_registration,
+    BotState, get_user_bot_state, set_user_bot_state, 
+    complete_user_registration_and_set_state, set_user_current_task, 
+    clear_user_current_task, get_user_current_task
+)
 from src.services import (
     create_jira_issue,
     find_open_issues,
@@ -172,6 +178,307 @@ def check_required_objects(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
     return True
 
+# === НОВИЙ ДИСПЕТЧЕР НА ОСНОВІ СТАНІВ ===
+
+async def main_message_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Головний диспетчер повідомлень на основі стану користувача.
+    Визначає стан користувача та перенаправляє на відповідний обробник.
+    """
+    if not update.message or not update.message.from_user:
+        return
+    
+    telegram_id = update.message.from_user.id
+    user_state = get_user_bot_state(telegram_id)
+    
+    logger.info(f"🔄 ДИСПЕТЧЕР: користувач {telegram_id}, стан: {user_state}, повідомлення: '{update.message.text[:50] if update.message.text else 'Non-text'}'")
+    
+    # 🔥 КРИТИЧНО: Перевіряємо чи користувач не в активному ConversationHandler
+    # Якщо є context.user_data з ключами conversation, пропускаємо обробку
+    if context.user_data and any(key in context.user_data for key in ['full_name', 'division', 'department', 'service', 'description']):
+        logger.info(f"⚠️ Користувач {telegram_id} в активному Conversation - пропускаємо диспетчер")
+        return  # Не обробляємо, передаємо ConversationHandler
+    
+    # 1. Стан реєстрації - перенаправляємо на обробники реєстрації
+    if user_state == BotState.REGISTRATION:
+        logger.info(f"🔐 Користувач {telegram_id} в стані реєстрації - пропускаємо далі")
+        # Тут викликається логіка реєстрації (залишається без змін)
+        return
+    
+    # 2. Стан авторизований без задач - обробляємо команди створення задач
+    elif user_state == BotState.AUTHORIZED_NO_TASKS:
+        logger.info(f"✅ Користувач {telegram_id} авторизований без відкритих задач")
+        
+        # Перевіряємо чи це не кнопка меню
+        message_text = update.message.text if update.message.text else ""
+        logger.info(f"🔍 ПЕРЕВІРКА: текст='{message_text}', startswith емодзі: {message_text.startswith(('🧾', '🆕', 'ℹ️', '🔄', '👤', '🏠'))}")
+        
+        if update.message.text and update.message.text.startswith(('🧾', '🆕', 'ℹ️', '🔄', '👤', '🏠')):
+            logger.info(f"📱 Користувач {telegram_id} натиснув кнопку: {update.message.text} - пропускаємо далі")
+            return  # Пропускаємо кнопки до інших обробників
+        
+        # Перевіряємо чи користувач не в процесі створення задачі через inline кнопки
+        if context.user_data.get("awaiting_description"):
+            logger.info(f"⏳ Користувач {telegram_id} очікує введення опису - пропускаємо автоматичне створення")
+            return  # Пропускаємо до conversation handler'а
+        
+        # Якщо це текстове повідомлення (не кнопка), то це створення нової задачі
+        if update.message.text and not update.message.text.startswith('/'):
+            logger.info(f"🆕 Автоматичне створення задачі для користувача {telegram_id} з тексту: '{update.message.text[:50]}...'")
+            
+            # Встановлюємо текст як опис задачі
+            context.user_data["issue_description"] = update.message.text
+            
+            # Викликаємо стандартний create_issue_start з пропуском збору опису
+            context.user_data["skip_description"] = True
+            await create_issue_start(update, context)
+            raise ApplicationHandlerStop  # Зупиняємо подальшу обробку
+    
+    # 3. Стан авторизований з задачею - обробляємо коментарі до задачі
+    elif user_state == BotState.AUTHORIZED_WITH_TASK:
+        current_task = get_user_current_task(telegram_id)
+        logger.info(f"📝 Користувач {telegram_id} має відкриту задачу {current_task}")
+        
+        # Перевіряємо чи це не кнопка меню
+        if update.message.text and update.message.text.startswith(('🧾', '🆕', 'ℹ️', '🔄', '👤', '🏠')):
+            logger.info(f"📱 Користувач {telegram_id} натиснув кнопку: {update.message.text} - пропускаємо далі")
+            return  # Пропускаємо кнопки до інших обробників
+        
+        # Всі повідомлення (текст, файли) - це коментарі до поточної задачі
+        if update.message.text or update.message.photo or update.message.document:
+            await handle_task_comment(update, context, current_task)
+            raise ApplicationHandlerStop  # Зупиняємо подальшу обробку
+    
+    # Якщо не оброблено вище, пропускаємо далі до інших обробників
+    logger.info(f"⏭️ Повідомлення не оброблено диспетчером, передаємо далі")
+
+
+async def handle_inline_issue_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробляє введення опису задачі після вибору сервісу через inline кнопки"""
+    if not update.message or not update.message.text:
+        return
+    
+    # 🔥 КРИТИЧНО: Перевіряємо чи користувач не в активному ConversationHandler
+    # Якщо є context.user_data з ключами conversation, пропускаємо обробку
+    if context.user_data and any(key in context.user_data for key in ['full_name', 'division', 'department', 'service']):
+        logger.info(f"⚠️ Користувач в активному Conversation - пропускаємо inline handler")
+        return  # Не обробляємо, передаємо ConversationHandler
+    
+    # Перевіряємо чи користувач очікує введення опису
+    if not context.user_data.get("awaiting_description"):
+        return
+    
+    telegram_id = update.message.from_user.id
+    description = update.message.text
+    
+    logger.info(f"📝 Отримано опис задачі від користувача {telegram_id}: '{description[:50]}...'")
+    
+    # Зберігаємо опис
+    context.user_data["description"] = description
+    context.user_data["issue_description"] = description
+    
+    # Видаляємо флаг очікування
+    context.user_data.pop("awaiting_description", None)
+    
+    # Тепер створюємо задачу автоматично
+    await update.message.reply_text("📝 *Створюємо задачу...*", parse_mode="Markdown")
+    
+    try:
+        # Копіюємо логіку створення задачі з service_selection_callback
+        bot_vars = context.user_data.copy()
+        
+        # Формуємо опис для задачі
+        task_description = (
+            f"ПІБ: {bot_vars.get('full_name','')}\n"
+            f"Підрозділ: {bot_vars.get('division','')}\n"
+            f"Департамент: {bot_vars.get('department','')}\n"
+            f"Сервіс: {bot_vars.get('service','')}\n"
+            f"Опис: {bot_vars.get('description','')}"
+        )
+        
+        # Додаємо поля проекта та типа задачі
+        if "issuetype" not in bot_vars:
+            bot_vars["issuetype"] = JIRA_ISSUE_TYPE
+        
+        if "project" not in bot_vars:
+            bot_vars["project"] = JIRA_PROJECT_KEY
+        
+        # Додаємо summary та description
+        bot_vars["summary"] = f"{bot_vars.get('service', 'Загальний')}: {bot_vars.get('description', '')[:50]}"
+        bot_vars["description"] = task_description
+        
+        # Додаємо telegram fields для JIRA
+        if not bot_vars.get("telegram_id"):
+            bot_vars["telegram_id"] = str(telegram_id)
+        
+        username = update.message.from_user.username
+        if username:
+            bot_vars["telegram_username"] = username
+        elif "telegram_username" in bot_vars:
+            del bot_vars["telegram_username"]
+        
+        # Додаємо аккаунт репортера
+        if bot_vars.get("account_id") is None and JIRA_REPORTER_ACCOUNT_ID:
+            bot_vars["account_id"] = JIRA_REPORTER_ACCOUNT_ID
+        
+        # Використовуємо функції з сервісів
+        from src.services import build_jira_payload, create_jira_issue
+        from src.constants import DIVISION_ID_MAPPINGS, DEPARTMENT_ID_MAPPINGS, SERVICE_ID_MAPPINGS
+        
+        if "division" in bot_vars and bot_vars["division"] in DIVISION_ID_MAPPINGS:
+            field_id = JIRA_FIELD_IDS["division"]
+            bot_vars[field_id] = {"id": DIVISION_ID_MAPPINGS[bot_vars["division"]]["id"]}
+        
+        if "department" in bot_vars and bot_vars["department"] in DEPARTMENT_ID_MAPPINGS:
+            field_id = JIRA_FIELD_IDS["department"]
+            bot_vars[field_id] = {"id": DEPARTMENT_ID_MAPPINGS[bot_vars["department"]]["id"]}
+        
+        if "service" in bot_vars and bot_vars["service"] in SERVICE_ID_MAPPINGS:
+            field_id = JIRA_FIELD_IDS["service"]
+            bot_vars[field_id] = {"id": SERVICE_ID_MAPPINGS[bot_vars["service"]]["id"]}
+        
+        payload = build_jira_payload(bot_vars)
+        
+        # Створюємо задачу в JIRA
+        issue_key = await create_jira_issue(payload)
+        
+        # Встановлюємо активну задачу
+        context.user_data["active_task"] = issue_key
+        
+        # Оновлюємо стан користувача
+        set_user_current_task(telegram_id, issue_key)
+        logger.info(f"🔄 Стан користувача {telegram_id} змінено на AUTHORIZED_WITH_TASK з задачею {issue_key}")
+        
+        # Очищаємо тимчасові дані
+        context.user_data.clear()
+        context.user_data["active_task"] = issue_key
+        context.user_data["telegram_id"] = str(telegram_id)
+        
+        await update.message.reply_text(
+            f"✅ *Задача створена!*\n\n"
+            f"🎫 *Номер задачі:* `{issue_key}`\n"
+            f"📝 *Опис:* {description[:100]}{'...' if len(description) > 100 else ''}\n\n"
+            f"💬 _Тепер ви можете писати коментарі - вони автоматично додаватимуться до цієї задачі._",
+            reply_markup=main_menu_markup,
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Помилка при створенні задачі через inline опис: {e}")
+        await update.message.reply_text(
+            "❌ *Помилка при створенні задачі*",
+            reply_markup=main_menu_markup,
+            parse_mode="Markdown"
+        )
+    
+    # Завжди зупиняємо подальшу обробку після завершення
+    raise ApplicationHandlerStop
+
+
+async def handle_task_comment(update: Update, context: ContextTypes.DEFAULT_TYPE, task_key: str):
+    """Обробляє коментар до існуючої задачі"""
+    telegram_id = update.message.from_user.id
+    
+    logger.info(f"💬 Додавання коментаря до задачі {task_key} від користувача {telegram_id}")
+    
+    # Спочатку перевіряємо статус задачі
+    try:
+        status_info = await get_issue_status(task_key)
+        status_category = status_info.get("category", "")
+        status_name = status_info.get("name", "")
+        
+        logger.info(f"🔍 Статус задачі {task_key}: {status_name} (категорія: {status_category})")
+        
+        # Якщо задача закрита (статус категорія "Done" або "Готово"), забороняємо додавання коментарів
+        if status_category in ["Done", "Готово"]:
+            logger.warning(f"🚫 Спроба додати коментар до закритої задачі {task_key} зі статусом {status_name}")
+            
+            # Очищаємо поточну задачу користувача
+            clear_user_current_task(telegram_id)
+            
+            # Оновлюємо стан користувача на AUTHORIZED_NO_TASKS
+            set_user_bot_state(telegram_id, BotState.AUTHORIZED_NO_TASKS)
+            
+            # Екрануємо спеціальні символи для MarkdownV2
+            task_key_escaped = task_key.replace("-", "\\-")
+            status_name_escaped = status_name.replace("-", "\\-").replace(".", "\\.")
+            
+            await update.message.reply_text(
+                f"❌ Задача *{task_key_escaped}* вже завершена \\(статус: _{status_name_escaped}_\\)\\.\n"
+                f"Неможливо додавати коментарі до закритих задач\\.\n\n"
+                f"📝 Для створення нової задачі просто опишіть проблему\\.",
+                parse_mode="MarkdownV2"
+            )
+            return
+            
+    except Exception as e:
+        logger.error(f"Помилка перевірки статусу задачі {task_key}: {e}")
+        await update.message.reply_text("❌ Помилка перевірки статусу задачі")
+        return
+    
+    # Отримуємо дані користувача
+    try:
+        from src.user_state_service import load_user_profile
+        user_profile = load_user_profile(telegram_id)
+        if not user_profile:
+            await update.message.reply_text("❌ Помилка: профіль користувача не знайдено")
+            return
+        
+        author_name = user_profile.get('full_name', 'Невідомий користувач')
+        
+        # Обробляємо різні типи повідомлень
+        if update.message.photo:
+            # Фото з текстом або без
+            caption = update.message.caption or ""
+            await handle_file_for_task(update, context, task_key, author_name)
+            
+        elif update.message.document:
+            # Документ з текстом або без
+            caption = update.message.caption or ""
+            await handle_file_for_task(update, context, task_key, author_name)
+            
+        elif update.message.text:
+            # Текстовий коментар
+            await text_comment_handler(update, context, task_key, author_name)
+            
+        else:
+            await update.message.reply_text("❌ Непідтримуваний тип повідомлення")
+            
+    except Exception as e:
+        logger.error(f"Помилка обробки коментаря до {task_key}: {e}")
+        await update.message.reply_text("❌ Помилка додавання коментаря")
+
+async def handle_file_for_task(update: Update, context: ContextTypes.DEFAULT_TYPE, task_key: str, author_name: str):
+    """Обробляє файл для конкретної задачі"""
+    try:
+        # Встановлюємо задачу як активну для існуючого file_handler
+        context.user_data["active_task"] = task_key
+        
+        # Викликаємо існуючий file_handler
+        await file_handler(update, context)
+        
+    except Exception as e:
+        logger.error(f"Помилка обробки файлу для задачі {task_key}: {e}")
+        await update.message.reply_text("❌ Помилка обробки файлу")
+
+async def text_comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, task_key: str, author_name: str):
+    """Обробляє текстовий коментар до задачі"""
+    text = update.message.text
+    
+    if not text:
+        await update.message.reply_text("❌ Порожній коментар")
+        return
+    
+    try:
+        # Додаємо коментар до Jira
+        await add_comment_to_jira(task_key, text, author_name)
+        # ВИДАЛЕНО: Дублювання з повідомленням webhook
+        # await update.message.reply_text(f"✅ Коментар додано до задачі {task_key}")
+        
+    except Exception as e:
+        logger.error(f"Помилка додавання текстового коментаря до {task_key}: {e}")
+        await update.message.reply_text("❌ Помилка додавання коментаря")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -179,47 +486,88 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Перевіряє авторизацію за Telegram ID та запитує контакт якщо потрібно.
     """
     # Type guards for required objects
-    if not check_required_objects(update, context, require_message=True):
+    if not check_required_objects(update, context, require_message=False):  # callback_query теж підтримується
         return
+    
+    # Універсальна функція для роботи з message і callback_query
+    async def send_message(text, reply_markup=None, parse_mode=None):
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         
     user_id = str(update.effective_user.id)
     context.user_data["telegram_id"] = user_id
     tg_username = update.effective_user.username or ""
     
     # Очищаємо попередні дані тільки при прямому введенні команди /start
-    # (не при виклику через restart_handler)
-    if (update.message.text and update.message.text == "/start" and 
+    # (не при виклику через restart_handler або callback)
+    message_text = None
+    if update.message and update.message.text:
+        message_text = update.message.text
+    elif update.callback_query and update.callback_query.data:
+        message_text = update.callback_query.data
+        
+    if (message_text and (message_text == "/start" or message_text == "RESTART") and 
         not context.user_data.get("profile")):
         context.user_data.clear()
         context.user_data["telegram_id"] = user_id
     
-    # Спочатку завжди перевіряємо користувача в Google Sheets за Telegram ID
-    logger.info(f"Шукаємо користувача за Telegram ID: {user_id}")
-    res = find_user_by_telegram_id(user_id)
+    # Використовуємо гібридний сервіс для пошуку користувача
+    logger.info(f"Комплексний пошук користувача за Telegram ID: {user_id}")
+    user_data, source = await user_manager.find_user_comprehensive(int(user_id))
     
-    if res:
-        # Користувача знайдено за Telegram ID
-        record, row = res
-        logger.info(f"Користувача знайдено за Telegram ID: {record.get('full_name')}")
+    if user_data:
+        # Користувача знайдено
+        logger.info(f"Користувача знайдено через: {source} - {user_data.get('full_name')}")
         
-        # Оновлюємо telegram_username, якщо змінився
-        if tg_username and tg_username != record.get("telegram_username", ""):
-            update_user_telegram(row, user_id, tg_username)
-            record["telegram_username"] = tg_username
+        # Оновлюємо telegram_username, якщо змінився і source Google
+        if tg_username and tg_username != user_data.get("telegram_username", "") and source == 'google':
+            try:
+                # Знаходимо рядок для оновлення
+                res = find_user_by_telegram_id(user_id)
+                if res:
+                    _, row = res
+                    update_user_telegram(row, user_id, tg_username)
+                    user_data["telegram_username"] = tg_username
+            except Exception as e:
+                logger.warning(f"Не вдалось оновити username в Google Sheets: {e}")
         
         # Зберігаємо профіль
-        context.user_data["profile"] = record
+        context.user_data["profile"] = user_data
         
-        # Показуємо спрощене вітання
-        await update.message.reply_text(
-            f"👋 *Вітаємо, {record['full_name']}!*",
+        # Показуємо детальне вітання з інформацією про джерело даних
+        source_text = {
+            'google': '🔄 *Дані отримано з Google Sheets*',
+            'cache': '💾 *Дані отримано з локального кешу*'
+        }.get(source, '')
+        
+        # Перевіряємо чи є відкрита задача
+        current_task = get_user_current_task(int(user_id))
+        task_info = ""
+        if current_task:
+            task_info = f"\n\n📋 *У вас є відкрита задача:* `{current_task}`\n💬 _Спочатку дочекайтесь її вирішення або додайте коментар до існуючої._"
+        
+        user_info = (
+            f"👋 *Вітаємо, {user_data['full_name']}!*\n\n"
+            f"👤 **ПІБ:** {user_data['full_name']}\n"
+            f"📱 **Телефон:** {user_data.get('mobile_number', 'Не вказано')}\n"
+            f"📍 **Підрозділ:** {user_data.get('division', 'Не вказано')}\n"
+            f"🏢 **Департамент:** {user_data.get('department', 'Не вказано')}\n\n"
+            f"{source_text}{task_info}\n\n"
+            f"🎯 *Тепер ви можете користуватися всіма функціями бота.*"
+        )
+        
+        await send_message(
+            user_info,
             reply_markup=main_menu_markup,
             parse_mode="Markdown"
         )
     else:
-        # Користувача не знайдено, запитуємо номер телефону для авторизації - спрощений текст
+        # Користувача не знайдено, запитуємо номер телефону для авторизації
         logger.info(f"Користувача не знайдено за Telegram ID, запитуємо номер телефону")
-        await update.message.reply_text(
+        await send_message(
             "👋 *Вітаємо в боті техпідтримки!*\n\n"
             "📱 *Натисніть кнопку щоб поділитися номером телефону:*",
             reply_markup=contact_request_markup,
@@ -241,40 +589,47 @@ async def global_contact_handler(update: Update, context: ContextTypes.DEFAULT_T
         
     contact = update.message.contact
     phone = contact.phone_number
+    telegram_id = int(update.effective_user.id)
+    tg_username = update.effective_user.username or ""
     
     logger.info(f"Глобальна авторизація: отримано номер телефону {phone}")
     
-    # Шукаємо користувача в Google Sheets
-    res = find_user_by_phone(phone)
-    if res:
-        record, row = res
-        # Оновлюємо telegram_id та username
-        tg_id = str(update.effective_user.id)
-        tg_username = update.effective_user.username or ""
+    # Використовуємо гібридний сервіс для авторизації
+    user_data, status = await user_manager.authorize_user(telegram_id, phone)
+    
+    if status == 'authorized':
+        # Користувача успішно авторизовано
+        # Оновлюємо username в записі
+        user_data["telegram_username"] = tg_username
+        context.user_data["profile"] = user_data
         
-        # Оновлюємо дані в таблиці
-        update_user_telegram(row, tg_id, tg_username)
+        # Показуємо успішну авторизацію з повною інформацією про користувача
+        cache_info = user_manager.get_user_cache_info(telegram_id)
+        sync_status = "🔄 *Синхронізовано з Google Sheets*" if cache_info.get("sync_status") else "💾 *Збережено в локальному кеші*"
         
-        # Зберігаємо профіль
-        record["telegram_id"] = tg_id.strip().replace("'", "")
-        record["telegram_username"] = tg_username
-        record["mobile_number"] = phone
-        account_id = record.get("account_id")
-        if account_id:
-            record["account_id"] = account_id
-        context.user_data["profile"] = record
+        user_info = (
+            f"✅ *Ви успішно авторизовані!*\n\n"
+            f"👤 **ПІБ:** {user_data['full_name']}\n"
+            f"📱 **Телефон:** {phone}\n"
+            f"📍 **Підрозділ:** {user_data.get('division', 'Не вказано')}\n"
+            f"🏢 **Департамент:** {user_data.get('department', 'Не вказано')}\n\n"
+            f"{sync_status}\n\n"
+            f"🎯 *Тепер ви можете користуватися всіма функціями бота.*"
+        )
         
         await update.message.reply_text(
-            f"✅ *Ви успішно авторизовані, {record['full_name']}!*",
+            user_info,
             reply_markup=main_menu_markup,
             parse_mode="Markdown"
         )
-        logger.info(f"Успішна глобальна авторизація для {record['full_name']}")
-    else:
-        # Номер не знайдено в базі - одразу переходимо до реєстрації
+        logger.info(f"Успішна глобальна авторизація для {user_data['full_name']}")
+        
+    elif status == 'need_registration':
+        # Номер не знайдено в базі - переходимо до реєстрації
         await update.message.reply_text(
-            "⚠️ Номер не знайдено в базі.\n\n"
-            "Для реєстрації та створення задачі введіть ваше повне ім'я (ПІБ):",
+            "⚠️ *Номер не знайдено в базі.*\n\n"
+            "🆕 *Розпочинаємо процес реєстрації...*\n\n"
+            "👤 *Для реєстрації введіть ваше повне ім'я (ПІБ):*",
             reply_markup=ReplyKeyboardRemove(),
             parse_mode="Markdown"
         )
@@ -288,10 +643,20 @@ async def global_contact_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["registration_step"] = "name"
         
         # Зберігаємо стан реєстрації у файл
-        telegram_id = int(update.effective_user.id)
         save_registration_state(telegram_id, context.user_data["registration"], "name")
         
         logger.info(f"Почато розширену реєстрацію нового користувача з номером {phone}")
+        
+    else:  # status == 'error'
+        # Помилка доступу до баз даних
+        await update.message.reply_text(
+            "❌ *Помилка авторизації.*\n\n"
+            "Зараз виникли технічні проблеми з доступом до бази даних. "
+            "Спробуйте пізніше або зверніться до адміністратора.\n\n"
+            "💾 *Ваші дані можуть бути збережені в локальному кеші для майбутнього використання.*",
+            reply_markup=main_menu_markup,
+            parse_mode="Markdown"
+        )
 
 
 async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -392,25 +757,61 @@ async def global_registration_handler(update: Update, context: ContextTypes.DEFA
             context.user_data["registration"] = saved_state["state"]["registration"]
             context.user_data["registration_step"] = saved_state["state"]["registration_step"]
             registration_step = saved_state["state"]["registration_step"]
-            logger.info(f"Відновлено стан реєстрації з файлу: крок '{registration_step}'")
+            logger.info(f"Відновлено стан реєстрації з файлу для користувача {telegram_id}: крок '{registration_step}'")
+            
+            # Повідомляємо користувача про відновлення
+            await update.message.reply_text(
+                "🔄 *Відновлено процес реєстрації.*\n\n"
+                "Продовжимо з того місця, де ви зупинилися...",
+                parse_mode="Markdown"
+            )
         elif saved_state and saved_state.get("state", {}).get("type") == "registration_completed":
             # Реєстрацію завершено, очищаємо файл і пропускаємо
             logger.info("Реєстрацію користувача вже завершено, очищаємо стан")
             complete_registration(telegram_id)
             raise ApplicationHandlerStop()
-    
-    # Якщо не в режимі реєстрації, пропускаємо управління далі
-    if not registration_step:
-        logger.info(f"Не в режимі реєстрації, завершуємо global_registration_handler для повідомлення: '{update.message.text}'")
-        # Викидаємо ApplicationHandlerStop для передачі управління наступному handler
-        raise ApplicationHandlerStop()
+        else:
+            # Перевіряємо чи є файл стану - якщо немає, то користувач не в процесі реєстрації
+            logger.info(f"Не в режимі реєстрації, завершуємо global_registration_handler для повідомлення: '{update.message.text}'")
+            # Просто повертаємось, щоб дозволити іншим handler'ам обробити повідомлення
+            return
     
     if registration_step == "name":
-        # Збираємо ПІБ
+        # Збираємо ПІБ з покращеною валідацією
         full_name = update.message.text.strip()
-        if not full_name or len(full_name) < 3:
+        
+        # Покращена валідація ПІБ
+        if not full_name:
             await update.message.reply_text(
-                "❌ *Будь ласка, введіть коректне ПІБ* _(мінімум 3 символи)_:",
+                "❌ *ПІБ не може бути пустим.*\n\n"
+                "Будь ласка, введіть ваше повне ім'я (ПІБ):",
+                parse_mode="Markdown"
+            )
+            return
+            
+        if len(full_name) < 3:
+            await update.message.reply_text(
+                "❌ *ПІБ занадто короткий.* _(мінімум 3 символи)_\n\n"
+                "Будь ласка, введіть ваше повне ім'я (ПІБ):",
+                parse_mode="Markdown"
+            )
+            return
+            
+        # Перевіряємо чи є принаймні два слова (ім'я та прізвище)
+        name_parts = full_name.split()
+        if len(name_parts) < 2:
+            await update.message.reply_text(
+                "❌ *Будь ласка, введіть повне ім'я* _(принаймні ім'я та прізвище)_\n\n"
+                "Приклад: Іван Петренко або Іван Іванович Петренко",
+                parse_mode="Markdown"
+            )
+            return
+            
+        # Перевіряємо чи немає цифр у ПІБ
+        if any(char.isdigit() for char in full_name):
+            await update.message.reply_text(
+                "❌ *ПІБ не може містити цифри.*\n\n"
+                "Будь ласка, введіть ваше повне ім'я (ПІБ):",
                 parse_mode="Markdown"
             )
             return
@@ -430,17 +831,22 @@ async def global_registration_handler(update: Update, context: ContextTypes.DEFA
         )
         await update.message.reply_text(
             f"✅ *Дякуємо, {full_name}!*\n\n"
-            "📍 *Оберіть ваш підрозділ:*",
+            "📍 *Оберіть ваш підрозділ зі списку:*",
             reply_markup=markup,
             parse_mode="Markdown"
         )
         
     elif registration_step == "division":
-        # Збираємо підрозділ
+        # Збираємо підрозділ з покращеною валідацією
         division = update.message.text.strip()
+        
+        # Перевіряємо чи підрозділ у списку дозволених
         if division not in DIVISIONS:
+            valid_divisions = "', '".join(DIVISIONS[:5])  # Показуємо перші 5 для прикладу
             await update.message.reply_text(
-                "❌ *Будь ласка, оберіть підрозділ зі списку:*",
+                f"❌ *Підрозділ '{division}' не знайдено в списку.*\n\n"
+                f"📍 *Доступні підрозділи:*\n'{valid_divisions}'...\n\n"
+                "*Будь ласка, оберіть підрозділ зі списку кнопок нижче:*",
                 parse_mode="Markdown"
             )
             return
@@ -460,17 +866,22 @@ async def global_registration_handler(update: Update, context: ContextTypes.DEFA
         )
         await update.message.reply_text(
             f"📍 *Підрозділ: {division}*\n\n"
-            "🏢 *Оберіть ваш департамент:*",
+            "🏢 *Тепер оберіть ваш департамент зі списку:*",
             reply_markup=markup,
             parse_mode="Markdown"
         )
         
     elif registration_step == "department":
-        # Збираємо департамент
+        # Збираємо департамент з покращеною валідацією
         department = update.message.text.strip()
+        
+        # Перевіряємо чи департамент у списку дозволених
         if department not in DEPARTMENTS:
+            valid_departments = "', '".join(DEPARTMENTS[:5])  # Показуємо перші 5 для прикладу
             await update.message.reply_text(
-                "❌ *Будь ласка, оберіть департамент зі списку:*",
+                f"❌ *Департамент '{department}' не знайдено в списку.*\n\n"
+                f"🏢 *Доступні департаменти:*\n'{valid_departments}'...\n\n"
+                "*Будь ласка, оберіть департамент зі списку кнопок нижче:*",
                 parse_mode="Markdown"
             )
             return
@@ -478,121 +889,173 @@ async def global_registration_handler(update: Update, context: ContextTypes.DEFA
         # Зберігаємо департамент
         context.user_data["registration"]["department"] = department
         
+        # Переходимо до підтвердження
+        context.user_data["registration_step"] = "confirm"
+        
         # Зберігаємо стан у файл
         save_registration_state(telegram_id, context.user_data["registration"], "confirm")
         
         # Показуємо підтвердження з усіма даними
         reg_data = context.user_data["registration"]
         confirmation_text = (
-            "✅ *Підтвердіть ваші дані:*\n\n"
+            "✅ *Перевірте та підтвердіть ваші дані:*\n\n"
             f"👤 **ПІБ:** {reg_data['full_name']}\n"
             f"📱 **Телефон:** {reg_data['phone']}\n"
             f"📍 **Підрозділ:** {reg_data['division']}\n"
             f"🏢 **Департамент:** {reg_data['department']}\n\n"
-            "*Все правильно?*"
+            "*Все правильно? Оберіть дію:*"
         )
         
-        # Кнопки підтвердження
+        # Кнопки підтвердження з чіткими варіантами
         markup = ReplyKeyboardMarkup(
-            [["Підтвердити"], ["❌ Скасувати"]],
+            [["✅ Підтвердити реєстрацію"], ["🔄 Почати заново"]],
             resize_keyboard=True,
             one_time_keyboard=True
         )
         
-        logger.info(f"Показуємо підтвердження для користувача з даними: {reg_data}")
+        logger.info(f"Показуємо підтвердження для користувача {telegram_id} з даними: {reg_data}")
         await update.message.reply_text(
             confirmation_text,
             reply_markup=markup,
             parse_mode="Markdown"
         )
         
-        context.user_data["registration_step"] = "confirm"
-        logger.info("Перехід в режим підтвердження (confirm)")
-        
     elif registration_step == "confirm":
         # Обробляємо підтвердження
         confirmation = update.message.text.strip()
         
-        # 🔍 ДЕТАЛЬНЕ ЛОГУВАННЯ ДЛЯ ДІАГНОСТИКИ КНОПКИ
-        logger.info(f"=== BUTTON DEBUG INFO ===")
-        logger.info(f"Raw text: '{update.message.text}'")
-        logger.info(f"Stripped text: '{confirmation}'")
-        logger.info(f"Text length: {len(confirmation)}")
-        logger.info(f"UTF-8 bytes: {confirmation.encode('utf-8')}")
-        logger.info(f"Hex representation: {confirmation.encode('utf-8').hex()}")
-        logger.info(f"Unicode codepoints: {[ord(c) for c in confirmation]}")
-        logger.info(f"User ID: {update.effective_user.id}")
-        logger.info(f"Chat ID: {update.effective_chat.id}")
-        logger.info(f"Message ID: {update.message.message_id}")
-        logger.info(f"=========================")
+        logger.info(f"Отримано підтвердження: '{confirmation}' від користувача {telegram_id}")
         
-        logger.info(f"Отримано підтвердження: '{confirmation}'")
+        # Покращена логіка розпізнавання підтвердження
+        confirm_variations = ["✅ підтвердити реєстрацію", "підтвердити", "confirm", "так", "yes", "✅", "ok"]
+        restart_variations = ["🔄 почати заново", "почати заново", "restart", "заново", "спочатку"]
         
-        if confirmation == "❌ Скасувати":
-            # Скасовуємо реєстрацію
-            context.user_data.pop("registration", None)
-            context.user_data.pop("registration_step", None)
+        confirmation_lower = confirmation.lower()
+        is_confirm = any(var.lower() in confirmation_lower for var in confirm_variations)
+        is_restart = any(var.lower() in confirmation_lower for var in restart_variations)
+        
+        if is_restart:
+            # Перезапускаємо реєстрацію з початку
+            context.user_data["registration"] = {
+                "telegram_id": str(update.effective_user.id),
+                "telegram_username": update.effective_user.username or ""
+            }
+            context.user_data["registration_step"] = "name"
             
-            # Видаляємо файл стану реєстрації
-            complete_registration(telegram_id)
+            # Зберігаємо початковий стан
+            save_registration_state(telegram_id, context.user_data["registration"], "name")
             
             await update.message.reply_text(
-                "❌ *Реєстрацію скасовано.*\n\n"
-                "Для створення задач вам потрібно буде пройти реєстрацію знову.",
-                reply_markup=main_menu_markup,
+                "🔄 *Почнемо реєстрацію заново.*\n\n"
+                "👤 *Введіть ваше повне ім'я (ПІБ):*",
+                reply_markup=ReplyKeyboardRemove(),
                 parse_mode="Markdown"
             )
-        else:
-            # Будь-який інший текст означає підтвердження
-            # Зберігаємо користувача в Google Sheets
+            return
+            
+        elif is_confirm:  # Якщо підтвердження
+            # Перевіряємо чи всі дані заповнено
+            reg_data = context.user_data.get("registration", {})
+            required_fields = ["full_name", "phone", "division", "department"]
+            missing_fields = [field for field in required_fields if not reg_data.get(field)]
+            
+            if missing_fields:
+                logger.error(f"Відсутні обов'язкові поля для реєстрації: {missing_fields}")
+                await update.message.reply_text(
+                    f"❌ *Помилка: не всі дані заповнено.*\n\n"
+                    f"Відсутні поля: {', '.join(missing_fields)}\n\n"
+                    "Почніть реєстрацію заново командою /start",
+                    reply_markup=main_menu_markup,
+                    parse_mode="Markdown"
+                )
+                # Очищаємо неповні дані
+                context.user_data.pop("registration", None)
+                context.user_data.pop("registration_step", None)
+                complete_registration(telegram_id)
+                return
+            
+            # Зберігаємо користувача через гібридний сервіс
             try:
-                reg_data = context.user_data["registration"]
-                
                 # Підготовуємо дані для Google Sheets
                 new_user_data = {
                     "telegram_id": reg_data["telegram_id"],
-                    "telegram_username": reg_data["telegram_username"],
+                    "telegram_username": reg_data.get("telegram_username", ""),
                     "mobile_number": reg_data["phone"],
                     "full_name": reg_data["full_name"],
                     "division": reg_data["division"],
                     "department": reg_data["department"]
                 }
                 
-                # Зберігаємо в Google Sheets
-                from src.google_sheets_service import add_new_user
-                row_num = add_new_user(new_user_data)
+                success, message, row_num = await user_manager.register_new_user(new_user_data)
                 
-                # Зберігаємо профіль користувача в context
-                context.user_data["profile"] = new_user_data
-                context.user_data["full_name"] = reg_data["full_name"]
-                context.user_data["mobile_number"] = reg_data["phone"]
-                
-                # Очищаємо дані реєстрації
-                context.user_data.pop("registration", None)
-                context.user_data.pop("registration_step", None)
-                
-                # Видаляємо файл стану реєстрації
-                complete_registration(telegram_id)
-                
-                # Показуємо успішне завершення реєстрації
-                await update.message.reply_text(
-                    f"🎉 *Реєстрацію завершено успішно!*\n\n"
-                    f"Ваші дані збережено в системі (рядок #{row_num}).\n"
-                    f"Тепер ви можете створювати задачі та користуватися всіма функціями бота.",
-                    reply_markup=main_menu_markup,
-                    parse_mode="Markdown"
-                )
-                
-                logger.info(f"Нового користувача {reg_data['full_name']} успішно зареєстровано та збережено в Google Sheets (рядок {row_num})")
-                
+                if success:
+                    # Зберігаємо профіль користувача в context
+                    context.user_data["profile"] = new_user_data
+                    
+                    # Очищаємо дані реєстрації
+                    context.user_data.pop("registration", None)
+                    context.user_data.pop("registration_step", None)
+                    
+                    # Позначаємо реєстрацію як завершену та встановлюємо стан AUTHORIZED_NO_TASKS
+                    complete_user_registration_and_set_state(telegram_id)
+                    
+                    # Показуємо успішне завершення реєстрації з повною інформацією
+                    success_message = (
+                        f"🎉 *Реєстрацію завершено успішно!*\n\n"
+                        f"👤 **ПІБ:** {reg_data['full_name']}\n"
+                        f"📱 **Телефон:** {reg_data['phone']}\n"
+                        f"📍 **Підрозділ:** {reg_data['division']}\n"
+                        f"🏢 **Департамент:** {reg_data['department']}\n\n"
+                        f"✅ *{message}*\n\n"
+                        f"Тепер ви можете створювати задачі та користуватися всіма функціями бота."
+                    )
+                    
+                    await update.message.reply_text(
+                        success_message,
+                        reply_markup=main_menu_markup,
+                        parse_mode="Markdown"
+                    )
+                    
+                    logger.info(f"Нового користувача {reg_data['full_name']} успішно зареєстровано: {message}")
+                else:
+                    # Помилка реєстрації
+                    await update.message.reply_text(
+                        f"❌ *Помилка збереження даних.*\n\n"
+                        f"Деталі: {message}\n\n"
+                        "Спробуйте пізніше або зверніться до адміністратора.",
+                        reply_markup=main_menu_markup,
+                        parse_mode="Markdown"
+                    )
             except Exception as e:
-                logger.error(f"Помилка збереження нового користувача в Google Sheets: {e}")
+                logger.error(f"Критична помилка реєстрації: {e}")
                 await update.message.reply_text(
-                    "❌ *Помилка збереження даних.*\n\n"
+                    f"❌ *Критична помилка реєстрації.*\n\n"
+                    f"Деталі: {str(e)}\n\n"
                     "Спробуйте пізніше або зверніться до адміністратора.",
                     reply_markup=main_menu_markup,
                     parse_mode="Markdown"
                 )
+        else:
+            # Невизначений ввід - показуємо доступні опції та повторюємо кнопки
+            await update.message.reply_text(
+                "❓ *Не зрозуміло ваш вибір.*\n\n"
+                "Будь ласка, оберіть одну з опцій:",
+                parse_mode="Markdown"
+            )
+            
+            # Повторюємо кнопки підтвердження
+            markup = ReplyKeyboardMarkup(
+                [["✅ Підтвердити реєстрацію"], ["🔄 Почати заново"]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+            
+            await update.message.reply_text(
+                "Доступні варіанти:\n"
+                "• '✅ Підтвердити реєстрацію' - завершити реєстрацію\n"
+                "• '🔄 Почати заново' - розпочати реєстрацію спочатку",
+                reply_markup=markup
+            )
     else:
         # Не в режимі реєстрації - передаємо управління далі
         raise ApplicationHandlerStop()
@@ -683,6 +1146,23 @@ async def create_task_button_handler(update: Update, context: ContextTypes.DEFAU
     """Простий обробник кнопки 'Створити задачу' для запуску ConversationHandler"""
     logger.info(f"create_task_button_handler: отримано текст '{update.message.text}'")
     
+    # 🔥 ПЕРЕВІРКА НА ВІДКРИТІ ЗАДАЧІ ПЕРЕД СТВОРЕННЯМ НОВОЇ
+    tg_id = str(update.effective_user.id)
+    try:
+        open_issues = await find_open_issues(tg_id)
+        if open_issues:
+            key = open_issues[0]["key"]
+            status = open_issues[0]["status"]
+            await update.message.reply_text(
+                f"У вас є відкрита задача *`{key}`* (статус: _{status}_).\n"
+                "_Спочатку дочекайтесь її вирішення або додайте коментар до існуючої._",
+                reply_markup=issues_view_markup,
+                parse_mode="Markdown"
+            )
+            return  # Блокуємо створення нової задачі
+    except Exception as e:
+        logger.error(f"Помилка при перевірці відкритих задач: {e}")
+    
     # Перенаправляємо на create_issue_start
     return await create_issue_start(update, context)
 
@@ -732,6 +1212,14 @@ async def my_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     username = update.effective_user.username or "немає"
     
+    # Універсальна функція для роботи з message і callback_query
+    async def send_message(text, reply_markup=None, parse_mode=None):
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    
     # Розширене логування
     logger.info(f"my_issues: користувач ID={user_id}, username=@{username}")
     
@@ -748,7 +1236,7 @@ async def my_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"my_issues: використовуємо ID з поточного повідомлення: {telegram_id}")
     
     # Показуємо нову клавіатуру для режиму перегляду задач
-    await update.message.reply_text(
+    await send_message(
         "_Завантажую список ваших задач..._",
         reply_markup=issues_view_markup,
         parse_mode="Markdown"
@@ -766,7 +1254,7 @@ async def my_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"my_issues: помилка при пошуку задач для {telegram_id}: {str(e)}")
         issues = []
     if not issues:
-        await update.message.reply_text(
+        await send_message(
             "*У вас немає відкритих задач.* _Ви можете створити нову задачу, натиснувши кнопку '🆕 Створити задачу'._",
             reply_markup=main_menu_markup,
             parse_mode="Markdown"
@@ -828,6 +1316,10 @@ async def update_issues_status(update: Update, context: ContextTypes.DEFAULT_TYP
             if active_task_is_done:
                 # Виводимо спеціальне повідомлення для виконаної задачі
                 done_issue = next((issue for issue in done_issues if issue["key"] == active_task), None)
+                
+                # Очищаємо поточну задачу користувача та оновлюємо стан
+                clear_user_current_task(int(tg_id))
+                set_user_bot_state(int(tg_id), BotState.AUTHORIZED_NO_TASKS)
                 
                 # Надсилаємо два повідомлення для гарантованої зміни клавіатури
                 await update.message.reply_text(
@@ -926,17 +1418,6 @@ async def return_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏠", reply_markup=main_menu_markup, parse_mode="Markdown")
 
 
-async def back_to_main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробник для інлайн-кнопки 'Вийти на головну'"""
-    await update.callback_query.answer()
-    
-    # Очищаємо непотрібні дані
-    if context.user_data and "last_issues_list" in context.user_data:
-        del context.user_data["last_issues_list"]
-
-    await update.callback_query.message.reply_text("🏠", reply_markup=main_menu_markup, parse_mode="Markdown")
-
-
 async def issue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Користувач вибрав задачу для коментування"""
     data = update.callback_query.data  # формат ISSUE_<KEY>
@@ -962,15 +1443,21 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Автоматично додає коментар до відкритої задачі"""
     logger.info(f"comment_handler викликано! Текст повідомлення: '{update.message.text}'")
     
+    # ПЕРЕВІРКА: якщо користувач у процесі реєстрації, НЕ обробляємо
+    registration_step = context.user_data.get("registration_step")
+    if registration_step:
+        logger.info(f"comment_handler: користувач у процесі реєстрації (крок: {registration_step}), ігноруємо це повідомлення")
+        return  # Просто виходимо, не обробляємо
+    
     # Перевіряємо, чи це не кнопка
     text = update.message.text
     logger.info(f"comment_handler: перевіряємо текст: '{text}'")
     
     if text in ["🧾 Мої задачі", "🆕 Створити задачу", "ℹ️ Допомога", "🔄 Повторити /start", 
-                "🔄 Оновити статус задачі", "🏠 Вийти на головну", "✅ Перевірити статус задачі"]:
+                "🔄 Оновити статус задачі", "✅ Перевірити статус задачі"]:
         # Це кнопка, пропускаємо
         logger.info(f"comment_handler: це кнопка, пропускаємо обробку")
-        raise ApplicationHandlerStop()
+        return  # Просто виходимо
     
     logger.info(f"comment_handler: це не кнопка, продовжуємо обробку коментаря")
     
@@ -979,17 +1466,47 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     open_issues = await find_open_issues(tg_id)
     
     if not open_issues:
-        await update.message.reply_text(
-            "У вас немає відкритих задач. Ви можете створити нову задачу, натиснувши кнопку '🆕 Створити задачу'.",
-            reply_markup=main_menu_markup,
-            parse_mode="Markdown"
-        )
+        # ВИДАЛЕНО: це повідомлення тепер обробляється новим диспетчером
+        # Просто виходимо без повідомлення, щоб інші обробники могли спрацювати
+        logger.info(f"comment_handler: у користувача {tg_id} немає відкритих задач, пропускаємо")
         return
     
     # Автоматично встановлюємо першу відкриту задачу як активну
     key = open_issues[0]["key"]
     context.user_data["active_task"] = key
     logger.info(f"Автоматично встановлено активну задачу: {key}")
+
+    # Перевіряємо статус задачі перед додаванням коментаря
+    try:
+        status_info = await get_issue_status(key)
+        status_category = status_info.get("category", "")
+        status_name = status_info.get("name", "")
+        
+        logger.info(f"🔍 Статус задачі {key}: {status_name} (категорія: {status_category})")
+        
+        # Якщо задача закрита (статус категорія "Done" або "Готово"), забороняємо додавання коментарів
+        if status_category in ["Done", "Готово"]:
+            logger.warning(f"🚫 Спроба додати коментар до закритої задачі {key} зі статусом {status_name}")
+            
+            # Очищаємо поточну задачу користувача
+            clear_user_current_task(int(tg_id))
+            
+            # Оновлюємо стан користувача на AUTHORIZED_NO_TASKS
+            set_user_bot_state(int(tg_id), BotState.AUTHORIZED_NO_TASKS)
+            
+            await update.message.reply_text(
+                f"❌ Задача *{key}* вже завершена (статус: _{status_name}_)\\.\n"
+                f"Неможливо додавати коментарі до закритих задач\\.\n\n"
+                f"📝 Для створення нової задачі просто опишіть проблему\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=main_menu_markup
+            )
+            return
+            
+    except Exception as e:
+        logger.error(f"Помилка перевірки статусу задачі {key}: {e}")
+        await update.message.reply_text("❌ Помилка перевірки статусу задачі")
+        return
 
     if not text or text.strip() == "":
         await update.message.reply_text(
@@ -1033,11 +1550,12 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         formatted_message = text
         add_message_to_cache(key, formatted_message)
         
-        await update.message.reply_text(
-            f"✅ Коментар додано до задачі *{key}*.\n_Ви можете продовжити додавати коментарі або прикріпити файл._", 
-            reply_markup=issues_view_markup,
-            parse_mode="Markdown"
-        )
+        # ВИДАЛЕНО: Дублювання з повідомленням webhook про коментар
+        # await update.message.reply_text(
+        #     f"✅ Коментар додано до задачі *{key}*.\n_Ви можете продовжити додавати коментарі або прикріпити файл._", 
+        #     reply_markup=issues_view_markup,
+        #     parse_mode="Markdown"
+        # )
     except Exception as e:
         logger.error(f"Помилка додавання коментаря до {key}: {str(e)}")
         await update.message.reply_text(
@@ -1052,6 +1570,39 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key = context.user_data.get("active_task")
     if not key:
         await update.message.reply_text("❗ *Спершу створіть або виберіть задачу.*", reply_markup=issues_view_markup, parse_mode="Markdown")
+        return
+
+    # Перевіряємо статус задачі перед прикріпленням файлу
+    try:
+        status_info = await get_issue_status(key)
+        status_category = status_info.get("category", "")
+        status_name = status_info.get("name", "")
+        
+        logger.info(f"🔍 Статус задачі {key}: {status_name} (категорія: {status_category})")
+        
+        # Якщо задача закрита (статус категорія "Done" або "Готово"), забороняємо прикріплення файлів
+        if status_category in ["Done", "Готово"]:
+            logger.warning(f"🚫 Спроба прикріпити файл до закритої задачі {key} зі статусом {status_name}")
+            
+            # Очищаємо поточну задачу користувача
+            telegram_id = update.message.from_user.id
+            clear_user_current_task(telegram_id)
+            
+            # Оновлюємо стан користувача на AUTHORIZED_NO_TASKS
+            set_user_bot_state(telegram_id, BotState.AUTHORIZED_NO_TASKS)
+            
+            await update.message.reply_text(
+                f"❌ Задача *{key}* вже завершена (статус: _{status_name}_)\\.\n"
+                f"Неможливо прикріпляти файли до закритих задач\\.\n\n"
+                f"📝 Для створення нової задачі просто опишіть проблему\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=main_menu_markup
+            )
+            return
+            
+    except Exception as e:
+        logger.error(f"Помилка перевірки статусу задачі {key}: {e}")
+        await update.message.reply_text("❌ Помилка перевірки статусу задачі")
         return
 
     # Перевірка на наявність файлу
@@ -1183,7 +1734,7 @@ async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         # Используем модуль форматирования для единообразного отображения
-        from fixed_issue_formatter import format_issue_info, format_issue_text
+        from src.fixed_issue_formatter import format_issue_info, format_issue_text
         
         # Получаем отформатированные данные
         formatted_issue = format_issue_info(issue)
@@ -1211,29 +1762,56 @@ async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def create_issue_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Початок створення задачі"""
-    logger.info(f"create_issue_start викликано! Текст повідомлення: '{update.message.text}'")
+    # Універсальна функція для роботи з message і callback_query
+    async def send_message(text, reply_markup=None, parse_mode=None):
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     
-    # Додаткова перевірка на точний текст
-    if update.message.text != "🆕 Створити задачу":
-        logger.warning(f"create_issue_start викликано з неочікуваним текстом: '{update.message.text}'")
+    # Отримуємо текст з message або callback_query
+    message_text = None
+    if update.message and update.message.text:
+        message_text = update.message.text
+    elif update.callback_query and update.callback_query.data:
+        message_text = update.callback_query.data
+    
+    logger.info(f"create_issue_start викликано! Текст повідомлення: '{message_text}'")
+    
+    # Перевіряємо чи це автоматичне створення задачі з довільного тексту
+    auto_create = context.user_data.get("skip_description", False)
+    
+    # Додаткова перевірка на точний текст кнопки (тільки якщо не автоматичне створення)
+    if not auto_create and message_text and message_text not in ["🆕 Створити задачу", "CREATE_ISSUE"]:
+        logger.warning(f"create_issue_start викликано з неочікуваним текстом: '{message_text}'")
         return ConversationHandler.END
 
+    # Завантажуємо профіль користувача якщо він не в контексті
     profile = context.user_data.get("profile")
+    if not profile:
+        from src.user_state_service import load_user_profile
+        tg_id = update.effective_user.id
+        profile = load_user_profile(tg_id)
+        if profile:
+            context.user_data["profile"] = profile
+    
     tg_id = str(update.effective_user.id)
     logger.info(f"create_issue_start: tg_id={tg_id}")
 
-    # Перевірка на відкриті задачі
-    open_issues = await find_open_issues(tg_id)
-    if open_issues:
-        key = open_issues[0]["key"]
-        status = open_issues[0]["status"]
-        await update.message.reply_text(
-            f"У вас є відкрита задача *`{key}`* (статус: _{status}_).\n"
-            "_Спочатку дочекайтесь її вирішення або додайте коментар до існуючої._",
-            reply_markup=issues_view_markup,
-            parse_mode="Markdown"
-        )
-        return ConversationHandler.END
+    # Перевірка на відкриті задачі (тільки якщо не автоматичне створення)
+    if not auto_create:
+        open_issues = await find_open_issues(tg_id)
+        if open_issues:
+            key = open_issues[0]["key"]
+            status = open_issues[0]["status"]
+            await send_message(
+                f"У вас є відкрита задача *`{key}`* (статус: _{status}_).\n"
+                "_Спочатку дочекайтесь її вирішення або додайте коментар до існуючої._",
+                reply_markup=issues_view_markup,
+                parse_mode="Markdown"
+            )
+            return ConversationHandler.END
 
     # Якщо користувач авторизований - беремо дані з профілю та переходимо одразу до вибору сервісу
     if profile and profile.get("division") and profile.get("department"):
@@ -1250,7 +1828,7 @@ async def create_issue_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"Авторизований користувач {profile['full_name']} з повними даними, переходимо до вибору сервісу")
 
         # Переходимо до вибору сервісу напряму
-        await update.message.reply_text(
+        await send_message(
             "*Оберіть сервіс:*",
             reply_markup=service_selection_markup(SERVICES),
             parse_mode="Markdown"
@@ -1269,7 +1847,7 @@ async def create_issue_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Перевіряємо що саме відсутнє
         if not profile.get("division"):
-            await update.message.reply_text(
+            await send_message(
                 "*Оберіть ваш підрозділ:*",
                 reply_markup=ReplyKeyboardMarkup(
                     [[div] for div in DIVISIONS] + [["🔙 Назад"]],
@@ -1281,7 +1859,7 @@ async def create_issue_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return DIVISION
         elif not profile.get("department"):
             context.user_data["division"] = profile["division"]
-            await update.message.reply_text(
+            await send_message(
                 "*Оберіть ваш департамент:*",
                 reply_markup=ReplyKeyboardMarkup(
                     [[dept] for dept in DEPARTMENTS] + [["🔙 Назад"]],
@@ -1293,14 +1871,9 @@ async def create_issue_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return DEPARTMENT
     else:
         # Для неавторизованого користувача - спочатку запитуємо ПІБ
-        markup = ReplyKeyboardMarkup(
-            [["🏠 Вийти на головну"]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-        await update.message.reply_text(
+        await send_message(
             "*Будь ласка, введіть ваше повне ім'я:*",
-            reply_markup=markup,
+            reply_markup=main_menu_markup,
             parse_mode="Markdown"
         )
         logger.info(f"Переход к FULL_NAME для неавторизованого tg_id={tg_id}")
@@ -1499,9 +2072,133 @@ async def service_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         return ConversationHandler.END
+    
+    # Перевіряємо чи вибраний сервіс є в списку валідних сервісів
+    if text not in SERVICES:
+        logger.warning(f"Невалідний сервіс: '{text}'. Доступні сервіси: {SERVICES}")
+        await update.message.reply_text(
+            "❌ *Невалідний вибір сервісу.*\n\n"
+            "*Оберіть сервіс зі списку:*",
+            reply_markup=service_selection_markup(SERVICES),
+            parse_mode="Markdown"
+        )
+        return SERVICE  # Залишаємось в тому ж стані
+    
+    logger.info(f"Користувач вибрав валідний сервіс: '{text}'")
     context.user_data["service"] = text
+    
+    # Перевіряємо чи є вже готовий опис (для автоматичного створення)
+    if context.user_data.get("issue_description"):
+        logger.info("Опис вже є з автоматичного створення, пропускаємо збір опису")
+        # Переміщаємо опис з issue_description до description
+        context.user_data["description"] = context.user_data["issue_description"]
+        context.user_data.pop("issue_description", None)
+        context.user_data.pop("skip_description", None)
+        
+        # Викликаємо логіку створення задачі з description_handler
+        await create_issue_automatically(update, context)
+        return ConversationHandler.END
+    
     await update.message.reply_text("*Опишіть проблему у кілька речень:*", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
     return DESCRIPTION
+
+
+async def create_issue_automatically(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Автоматично створює задачу з наявними даними"""
+    await update.message.reply_text(
+        "📝 *Створюємо задачу...*",
+        parse_mode="Markdown"
+    )
+    
+    # Створюємо задачу автоматично
+    try:
+        bot_vars = context.user_data.copy()
+        
+        # Формуємо опис для задачі
+        task_description = (
+            f"ПІБ: {bot_vars.get('full_name','')}\n"
+            f"Підрозділ: {bot_vars.get('division','')}\n"
+            f"Департамент: {bot_vars.get('department','')}\n"
+            f"Сервіс: {bot_vars.get('service','')}\n"
+            f"Опис: {bot_vars.get('description','')}"
+        )
+        
+        # Додаємо поля проекта та типа задачі, якщо їх немає
+        if "issuetype" not in bot_vars:
+            bot_vars["issuetype"] = JIRA_ISSUE_TYPE
+        
+        if "project" not in bot_vars:
+            bot_vars["project"] = JIRA_PROJECT_KEY
+        
+        # Додаємо summary та description
+        bot_vars["summary"] = f"{bot_vars.get('service', 'Загальний')}: {bot_vars.get('description', '')[:50]}"
+        bot_vars["description"] = task_description
+        
+        # Додаємо telegram fields для JIRA
+        if not bot_vars.get("telegram_id"):
+            bot_vars["telegram_id"] = str(update.effective_user.id)
+        
+        username = update.effective_user.username
+        if username:
+            bot_vars["telegram_username"] = username
+        elif "telegram_username" in bot_vars:
+            del bot_vars["telegram_username"]
+        
+        # Додаємо аккаунт репортера, якщо є
+        if bot_vars.get("account_id") is None and JIRA_REPORTER_ACCOUNT_ID:
+            bot_vars["account_id"] = JIRA_REPORTER_ACCOUNT_ID
+        
+        # Використовуємо функцію build_jira_payload
+        from src.services import build_jira_payload
+        from src.constants import DIVISION_ID_MAPPINGS, DEPARTMENT_ID_MAPPINGS, SERVICE_ID_MAPPINGS
+        
+        if "division" in bot_vars and bot_vars["division"] in DIVISION_ID_MAPPINGS:
+            field_id = JIRA_FIELD_IDS["division"]
+            bot_vars[field_id] = {"id": DIVISION_ID_MAPPINGS[bot_vars["division"]]["id"]}
+        
+        if "department" in bot_vars and bot_vars["department"] in DEPARTMENT_ID_MAPPINGS:
+            field_id = JIRA_FIELD_IDS["department"]
+            bot_vars[field_id] = {"id": DEPARTMENT_ID_MAPPINGS[bot_vars["department"]]["id"]}
+        
+        if "service" in bot_vars and bot_vars["service"] in SERVICE_ID_MAPPINGS:
+            field_id = JIRA_FIELD_IDS["service"]
+            bot_vars[field_id] = {"id": SERVICE_ID_MAPPINGS[bot_vars["service"]]["id"]}
+        
+        payload = build_jira_payload(bot_vars)
+        
+        # Створюємо задачу в JIRA
+        issue_key = await create_jira_issue(payload)
+        
+        # Встановлюємо активну задачу
+        context.user_data["active_task"] = issue_key
+        
+        # Оновлюємо стан користувача - тепер у нього є відкрита задача
+        telegram_id = update.effective_user.id
+        set_user_current_task(telegram_id, issue_key)
+        logger.info(f"🔄 Стан користувача {telegram_id} змінено на AUTHORIZED_WITH_TASK з задачею {issue_key}")
+        
+        # Очищаємо тимчасові дані
+        context.user_data.clear()
+        context.user_data["active_task"] = issue_key
+        context.user_data["telegram_id"] = str(telegram_id)
+        
+        await update.message.reply_text(
+            f"✅ *Задача створена!*\n\n"
+            f"🎫 *Номер задачі:* `{issue_key}`\n"
+            f"📝 *Опис:* {bot_vars.get('description', '')[:100]}{'...' if len(bot_vars.get('description', '')) > 100 else ''}\n\n"
+            f"💬 *Тепер ви можете додавати коментарі до цієї задачі, просто написавши повідомлення.*",
+            reply_markup=issues_view_markup,
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Помилка створення задачі: {str(e)}")
+        await update.message.reply_text(
+            f"❌ *Помилка створення задачі:*\n_{str(e)}_\n\n"
+            f"Спробуйте ще раз або зверніться до адміністратора.",
+            reply_markup=main_menu_markup,
+            parse_mode="Markdown"
+        )
 
 
 async def description_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1632,6 +2329,11 @@ async def description_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Встановлюємо активну задачу (відновлено з confirm_callback)
         context.user_data["active_task"] = issue_key
         
+        # Оновлюємо стан користувача - тепер у нього є відкрита задача
+        telegram_id = update.effective_user.id
+        set_user_current_task(telegram_id, issue_key)
+        logger.info(f"🔄 Стан користувача {telegram_id} змінено на AUTHORIZED_WITH_TASK з задачею {issue_key}")
+        
         # Прикріплюємо фото, якщо є
         if context.user_data.get("attached_photo"):
             try:
@@ -1645,30 +2347,33 @@ async def description_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 # Attach to JIRA with proper parameters
                 await attach_file_to_jira(issue_key, filename, bytes(file_bytes))
                 
-                await update.message.reply_text(
-                    f"✅ *Задача створена:* `{issue_key}`\n"
-                    f"📸 *Фото прикріплено успішно*\n\n"
-                    f"_Тепер ви можете додати коментар або прикріпити інші файли._", 
-                    reply_markup=issues_view_markup,
-                    parse_mode="Markdown"
-                )
+                # ВИДАЛЕНО: Дублювання з webhook повідомленням про створення задачі
+                # await update.message.reply_text(
+                #     f"✅ *Задача створена:* `{issue_key}`\n"
+                #     f"📸 *Фото прикріплено успішно*\n\n"
+                #     f"_Тепер ви можете додати коментар або прикріпити інші файли._", 
+                #     reply_markup=issues_view_markup,
+                #     parse_mode="Markdown"
+                # )
             except Exception as e:
                 logger.error(f"Помилка прикріплення фото до задачі {issue_key}: {str(e)}")
-                await update.message.reply_text(
-                    f"✅ *Задача створена:* `{issue_key}`\n"
-                    f"❌ *Помилка прикріплення фото:* _{str(e)}_\n\n"
-                    f"_Ви можете спробувати прикріпити фото знову через коментарі._", 
-                    reply_markup=issues_view_markup,
-                    parse_mode="Markdown"
-                )
+                # ВИДАЛЕНО: Дублювання з webhook повідомленням про створення задачі
+                # await update.message.reply_text(
+                #     f"✅ *Задача створена:* `{issue_key}`\n"
+                #     f"❌ *Помилка прикріплення фото:* _{str(e)}_\n\n"
+                #     f"_Ви можете спробувати прикріпити фото знову через коментарі._", 
+                #     reply_markup=issues_view_markup,
+                #     parse_mode="Markdown"
+                # )
         else:
-            # Задача створена без фото
-            await update.message.reply_text(
-                f"✅ *Задача створена:* `{issue_key}`\n\n"
-                f"_Тепер ви можете додати коментар або прикріпити файл._", 
-                reply_markup=issues_view_markup,
-                parse_mode="Markdown"
-            )
+            # ВИДАЛЕНО: Дублювання з webhook повідомленням про створення задачі
+            # await update.message.reply_text(
+            #     f"✅ *Задача створена:* `{issue_key}`\n\n"
+            #     f"_Тепер ви можете додати коментар або прикріпити файл._", 
+            #     reply_markup=issues_view_markup,
+            #     parse_mode="Markdown"
+            # )
+            pass  # Webhook вже надішле повідомлення про створення задачі
         
         # Очищаємо дані conversation після успішного створення
         conversation_keys = ["full_name", "mobile_number", "division", "department", 
@@ -1804,6 +2509,11 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Встановлюємо активну задачу
         context.user_data["active_task"] = issue_key
         
+        # Оновлюємо стан користувача - тепер у нього є відкрита задача
+        telegram_id = query.from_user.id
+        set_user_current_task(telegram_id, issue_key)
+        logger.info(f"🔄 Стан користувача {telegram_id} змінено на AUTHORIZED_WITH_TASK з задачею {issue_key}")
+        
         # Перевіряємо, чи є прикріплене фото
         attached_photo = context.user_data.get("attached_photo")
         if attached_photo:
@@ -1824,27 +2534,31 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Очищаємо дані про фото
                 del context.user_data["attached_photo"]
                 
-                await query.message.reply_text(
-                    f"✅ Задача створена: *{issue_key}*\n"
-                    f"📸 Фото успішно прикріплено до задачі!\n"
-                    f"_Тепер ви можете додати коментар або прикріпити інші файли._", 
-                    reply_markup=issues_view_markup,
-                    parse_mode="Markdown"
-                )
+                # ВИДАЛЕНО: Дублювання з webhook повідомленням про створення задачі
+                # await query.message.reply_text(
+                #     f"✅ Задача створена: *{issue_key}*\n"
+                #     f"📸 Фото успішно прикріплено до задачі!\n"
+                #     f"_Тепер ви можете додати коментар або прикріпити інші файли._", 
+                #     reply_markup=issues_view_markup,
+                #     parse_mode="Markdown"
+                # )
             except Exception as e:
                 logger.error(f"Помилка прикріплення фото до задачі {issue_key}: {str(e)}")
-                await query.message.reply_text(
-                    f"✅ Задача створена: *{issue_key}*\n"
-                    f"❌ Помилка прикріплення фото: _{str(e)}_\n"
-                    f"_Ви можете спробувати прикріпити фото знову через коментарі._", 
-                    reply_markup=issues_view_markup,
-                    parse_mode="Markdown"
-                )
+                # ВИДАЛЕНО: Дублювання з webhook повідомленням про створення задачі
+                # await query.message.reply_text(
+                #     f"✅ Задача створена: *{issue_key}*\n"
+                #     f"❌ Помилка прикріплення фото: _{str(e)}_\n"
+                #     f"_Ви можете спробувати прикріпити фото знову через коментарі._", 
+                #     reply_markup=issues_view_markup,
+                #     parse_mode="Markdown"
+                # )
         else:
-            # Змінюємо клавіатуру на issues_view_markup для відображення кнопок оновлення статусу
-            await query.message.reply_text(f"✅ Задача створена: *{issue_key}*\n_Тепер ви можете додати коментар або прикріпити файл._", 
-                                        reply_markup=issues_view_markup,
-                                        parse_mode="Markdown")
+            # ЗАКОМЕНТОВАНО: Дублювання з webhook повідомленням
+            # # Змінюємо клавіатуру на issues_view_markup для відображення кнопок оновлення статусу
+            # await query.message.reply_text(f"✅ Задача створена: *{issue_key}*\n_Тепер ви можете додати коментар або прикріпити файл._", 
+            #                             reply_markup=issues_view_markup,
+            #                             parse_mode="Markdown")
+            pass  # Webhook вже надішле повідомлення про створення задачі
     except JiraApiError as e:
         error_message = str(e)
         # Извлекаем информативную часть сообщения об ошибке
@@ -1923,7 +2637,7 @@ async def show_active_task_details(update: Update, context: ContextTypes.DEFAULT
         logger.info(f"Отримані дані задачі {key} від Jira API: department={issue.get('department')}, division={issue.get('division')}, service={issue.get('service')}")
         
         # Используем модуль форматирования для единообразного отображения
-        from fixed_issue_formatter import format_issue_info, format_issue_text
+        from src.fixed_issue_formatter import format_issue_info, format_issue_text
         
         # Получаем отформатированные данные
         formatted_issue = format_issue_info(issue)
@@ -1966,9 +2680,112 @@ async def show_active_task_details(update: Update, context: ContextTypes.DEFAULT
         return False
 
 
+async def sync_cache_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для синхронізації локального кешу з Google Sheets (тільки для адміністраторів)"""
+    # Перевірка прав адміністратора (можна налаштувати список ID адміністраторів)
+    admin_ids = [5667252017]  # Додайте ID адміністраторів
+    user_id = update.effective_user.id
+    
+    if user_id not in admin_ids:
+        await update.message.reply_text(
+            "❌ *Доступ заборонено.*\n\nЦя команда доступна тільки адміністраторам.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    await update.message.reply_text("🔄 *Починаємо синхронізацію...*", parse_mode="Markdown")
+    
+    try:
+        result = user_manager.sync_pending_users()
+        
+        sync_message = (
+            f"✅ *Синхронізація завершена!*\n\n"
+            f"📊 **Статистика:**\n"
+            f"✅ Синхронізовано: {result['synced']}\n"
+            f"❌ Помилок: {result['failed']}\n"
+        )
+        
+        if result['errors']:
+            sync_message += f"\n🔍 **Деталі помилок:**\n"
+            for error in result['errors'][:5]:  # Показуємо тільки перші 5 помилок
+                sync_message += f"• {error}\n"
+            if len(result['errors']) > 5:
+                sync_message += f"...та ще {len(result['errors']) - 5} помилок"
+        
+        await update.message.reply_text(sync_message, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Помилка синхронізації: {e}")
+        await update.message.reply_text(
+            f"❌ *Помилка синхронізації:*\n{str(e)}",
+            parse_mode="Markdown"
+        )
+
+async def cache_status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показує статус кешу для поточного користувача"""
+    telegram_id = int(update.effective_user.id)
+    
+    try:
+        cache_info = user_manager.get_user_cache_info(telegram_id)
+        
+        if cache_info.get("cached"):
+            status_message = (
+                f"💾 *Статус вашого кешу:*\n\n"
+                f"✅ **В кеші:** Так\n"
+                f"🔄 **Синхронізація:** {'✅ Синхронізовано' if cache_info.get('sync_status') else '⏳ Очікує'}\n"
+                f"📅 **Остання синхронізація:** {cache_info.get('last_sync', 'Невідомо')}\n"
+                f"🎯 **Статус:** {cache_info.get('status', 'Невідомо')}"
+            )
+        else:
+            status_message = (
+                f"💾 *Статус вашого кешу:*\n\n"
+                f"❌ **В кеші:** Ні\n"
+                f"ℹ️ Ваші дані будуть кешовані після наступної авторизації."
+            )
+        
+        await update.message.reply_text(status_message, parse_mode="Markdown")
+        
+    except Exception as e:
+        logger.error(f"Помилка отримання статусу кешу: {e}")
+        await update.message.reply_text(
+            f"❌ *Помилка отримання статусу кешу:*\n{str(e)}",
+            parse_mode="Markdown"
+        )
+
+
+async def reset_registration_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скидання поточної реєстрації та повернення до головного меню"""
+    telegram_id = int(update.effective_user.id)
+    
+    # Очищаємо всі дані реєстрації
+    context.user_data.pop("registration", None)
+    context.user_data.pop("registration_step", None)
+    
+    # Видаляємо файл стану
+    from src.user_state_service import complete_registration
+    complete_registration(telegram_id)
+    
+    await update.message.reply_text(
+        "🔄 *Реєстрацію скинуто.*\n\n"
+        "Ви повернулись до головного меню. Для реєстрації введіть команду /start",
+        reply_markup=main_menu_markup,
+        parse_mode="Markdown"
+    )
+    
+    logger.info(f"Скинуто реєстрацію для користувача {telegram_id}")
+
+
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробник для кнопки 'ℹ️ Допомога' - перенаправляє користувача до телеграм-каналу підтримки"""
-    await update.message.reply_text(
+    # Універсальна функція для роботи з message і callback_query
+    async def send_message(text, reply_markup=None):
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup)
+    
+    await send_message(
         "Для отримання допомоги перейдіть до каналу підтримки: https://t.me/+zoabM0XuLeo2NzY6\n\n"
         "Там ви зможете поставити питання і отримати консультацію.",
         reply_markup=main_menu_markup
@@ -1977,12 +2794,12 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def register_handlers(application):
     """Реєстрація всіх хендлерів у Application"""
+    
     # ConversationHandler для створення задачі
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & filters.Regex("^🆕 Створити задачу$"), create_issue_start)],
         states={
-            FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^🏠 Вийти на головну$"), full_name_handler),
-                       MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation)],
+            FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, full_name_handler)],
             MOBILE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^🏠 Вийти на головну$"), mobile_number_handler), 
                           MessageHandler(filters.CONTACT, contact_handler),
                           MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation)],
@@ -1991,8 +2808,9 @@ def register_handlers(application):
                       MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation)],
             DEPARTMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^🏠 Вийти на головну$"), department_handler),
                         MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation)],
-            SERVICE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^🏠 Вийти на головну$"), service_handler),
-                     MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation)],
+            SERVICE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(🏠 Вийти на головну|🔙 Назад)$"), service_handler),
+                     MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation),
+                     MessageHandler(filters.Regex("^🔙 Назад$"), return_to_main_from_conversation)],
             DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^🏠 Вийти на головну$"), description_handler),
                          MessageHandler(filters.PHOTO, description_handler),
                          MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation)],
@@ -2007,6 +2825,9 @@ def register_handlers(application):
     application.add_handler(conv_handler)
     
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("reset", reset_registration_handler))
+    application.add_handler(CommandHandler("sync_cache", sync_cache_handler))
+    application.add_handler(CommandHandler("cache_status", cache_status_handler))
     application.add_handler(MessageHandler(filters.Regex("🆕 Створити задачу"), create_task_button_handler))
     application.add_handler(MessageHandler(filters.Regex("🔄 Повторити /start"), restart_handler))
     application.add_handler(MessageHandler(filters.Regex("🔄 Повторна авторизація"), re_auth_handler))
@@ -2015,9 +2836,18 @@ def register_handlers(application):
     application.add_handler(MessageHandler(filters.CONTACT, global_contact_handler))
     application.add_handler(MessageHandler(filters.Regex("👤 Продовжити без авторизації"), continue_without_auth))
     application.add_handler(MessageHandler(filters.Regex("🧾 Мої задачі"), my_issues))
+    
+    # Callback handlers для головного меню (видалено, тепер використовуємо звичайні кнопки)
+    # application.add_handler(CallbackQueryHandler(my_issues, pattern="^MY_ISSUES$"))
+    # application.add_handler(CallbackQueryHandler(create_issue_start, pattern="^CREATE_ISSUE$"))
+    # application.add_handler(CallbackQueryHandler(help_handler, pattern="^HELP$"))
+    # application.add_handler(CallbackQueryHandler(start, pattern="^RESTART$"))
+    
+    # Обробники для вибору сервісу (видалено, тепер використовуємо звичайні кнопки)
+    # application.add_handler(CallbackQueryHandler(service_selection_callback, pattern="^SERVICE_"))
+    # application.add_handler(CallbackQueryHandler(service_selection_callback, pattern="^BACK_TO_MAIN$"))
+    
     application.add_handler(CallbackQueryHandler(issue_callback, pattern="^ISSUE_"))
-    # Додаємо обробник для інлайн кнопки "Вийти на головне"
-    application.add_handler(CallbackQueryHandler(back_to_main_callback, pattern="^BACK_TO_MAIN$"))
     application.add_handler(MessageHandler(filters.Regex("🏠 Вийти на головну"), return_to_main))
     # Обробник для оновлення статусів задач
     application.add_handler(MessageHandler(filters.Regex("🔄 Оновити статус задачі"), update_issues_status))
@@ -2028,14 +2858,26 @@ def register_handlers(application):
     # Обробник для кнопки допомоги
     application.add_handler(MessageHandler(filters.Regex("ℹ️ Допомога"), help_handler))
 
-    # Обробник комментариев (МАЄ БУТИ ПЕРЕД global_registration_handler)
+    # Обробник для збору опису після inline кнопок (вищий пріоритет, GROUP 0)
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(🆕|🧾|✅|🏠|🔄 Оновити статус задачі|🔄 Повторити /start|🔄 Повторна авторизація|👤|❌|ℹ️|💬 коментар до задачі)"), 
-        comment_handler
-    ))
-    
-    # Глобальний обробник реєстрації нових користувачів (ПІСЛЯ обробника коментарів)
+        filters.TEXT & ~filters.COMMAND,
+        handle_inline_issue_description
+    ), group=0)
+
+    # Додаємо новий основний диспетчер з найвищим пріоритетом (GROUP 1)
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(🆕 Створити задачу|🧾|✅|🏠|🔄|👤|❌|ℹ️)"),
+        filters.TEXT & ~filters.COMMAND,
+        main_message_dispatcher
+    ), group=1)
+
+    # Глобальний обробник реєстрації нових користувачів (GROUP 2 - середній пріоритет)
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(🆕 Створити задачу|🧾|🏠|ℹ️|💬 коментар до задачі)"),
         global_registration_handler
-    ))
+    ), group=2)
+    
+    # Обробник комментариев (GROUP 3 - нижчий пріоритет)
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(🆕|🧾|✅|🏠|🔄|👤|❌|ℹ️|💬)"), 
+        comment_handler
+    ), group=3)

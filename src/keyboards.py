@@ -3,7 +3,7 @@
 from telegram import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from src.constants import DIVISIONS, DEPARTMENTS, SERVICES
 
-# Кнопки головного меню
+# Кнопки головного меню (використовуємо звичайні кнопки)
 MAIN_MENU_BUTTONS = [
     ["🧾 Мої задачі", "🆕 Створити задачу"],
     ["ℹ️ Допомога", "🔄 Повторити /start"]
@@ -17,7 +17,8 @@ main_menu_markup = ReplyKeyboardMarkup(
 # Кнопка для запиту контактів
 contact_request_markup = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("📞 Надати номер телефону", request_contact=True)]
+        [KeyboardButton("📞 Надати номер телефону", request_contact=True)],
+        [KeyboardButton("🏠 Вийти на головну")]
     ],
     resize_keyboard=True,
     one_time_keyboard=True
@@ -27,7 +28,8 @@ contact_request_markup = ReplyKeyboardMarkup(
 failed_auth_markup = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📞 Надати номер телефону", request_contact=True)],
-        [KeyboardButton("👤 Продовжити без авторизації")]
+        [KeyboardButton("👤 Продовжити без авторизації")],
+        [KeyboardButton("🏠 Вийти на головну")]
     ],
     resize_keyboard=True,
     one_time_keyboard=True
@@ -55,7 +57,7 @@ issues_view_markup = ReplyKeyboardMarkup(
     one_time_keyboard=False
 )
 
-# Кнопки для кроку «Сервіс»
+# Кнопки для кроку «Сервіс» - використовуємо звичайні кнопки
 def service_selection_markup(services: list) -> ReplyKeyboardMarkup:
     """
     services: список рядків з назвами сервісів
