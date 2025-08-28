@@ -1,0 +1,27 @@
+[Unit]
+Description=Telegram Bot Monitor Service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/Bot1
+ExecStart=/home/Bot1/monitor_bot.sh start
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables
+Environment=PYTHONPATH=/home/Bot1
+Environment=PYTHONUNBUFFERED=1
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/Bot1
+
+[Install]
+WantedBy=multi-user.target
