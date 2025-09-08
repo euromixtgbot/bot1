@@ -8,7 +8,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,61 @@ class UserStateManager:
             logger.error(f"Помилка отримання інформації про користувача {telegram_id}: {e}")
             return None
 
+def save_user_profile(telegram_id: int, user_data: Dict[str, Any], status: str = "active") -> bool:
+    """Зберігає повний профіль користувача як резервну копію та кеш"""
+    try:
+        profile_data = {
+            "profile": user_data,
+            "status": status,  # active, registration_in_progress, inactive
+            "sync_with_google": True,
+            "type": "user_profile"
+        }
+        return user_state_manager.save_user_state(telegram_id, profile_data)
+    except Exception as e:
+        logger.error(f"Помилка збереження профілю користувача {telegram_id}: {e}")
+        return False
+
+def load_user_profile(telegram_id: int) -> Optional[Dict[str, Any]]:
+    """Завантажує повний профіль користувача з локального кешу"""
+    try:
+        state = user_state_manager.load_user_state(telegram_id)
+        if state and state.get("type") == "user_profile":
+            return state.get("profile", {})
+        return None
+    except Exception as e:
+        logger.error(f"Помилка завантаження профілю користувача {telegram_id}: {e}")
+        return None
+
+def update_user_sync_status(telegram_id: int, synced: bool) -> bool:
+    """Оновлює статус синхронізації з Google Sheets"""
+    try:
+        state = user_state_manager.load_user_state(telegram_id)
+        if state and state.get("type") == "user_profile":
+            state["sync_with_google"] = synced
+            state["last_sync"] = datetime.now().isoformat()
+            return user_state_manager.save_user_state(telegram_id, state)
+        return False
+    except Exception as e:
+        logger.error(f"Помилка оновлення статусу синхронізації {telegram_id}: {e}")
+        return False
+
+def list_all_cached_users() -> List[Dict[str, Any]]:
+    """Повертає список всіх користувачів з локального кешу"""
+    try:
+        all_users = []
+        telegram_ids = user_state_manager.list_all_users()
+        
+        for telegram_id in telegram_ids:
+            profile = load_user_profile(telegram_id)
+            if profile:
+                profile["telegram_id"] = telegram_id
+                all_users.append(profile)
+        
+        return all_users
+    except Exception as e:
+        logger.error(f"Помилка отримання списку користувачів: {e}")
+        return []
+
 # Глобальний екземпляр менеджера
 user_state_manager = UserStateManager()
 
@@ -134,6 +189,19 @@ def load_registration_state(telegram_id: int) -> Optional[Dict[str, Any]]:
     """Завантажує стан реєстрації користувача (тільки активні реєстрації)"""
     state = user_state_manager.load_user_state(telegram_id)
     if state and state.get("type") == "registration_in_progress":
+        # Перевіряємо чи не застаріла реєстрація (старше 24 годин)
+        from datetime import datetime, timedelta
+        try:
+            user_info = user_state_manager.get_user_info(telegram_id)
+            if user_info and "last_updated" in user_info:
+                last_updated = datetime.fromisoformat(user_info["last_updated"])
+                if datetime.now() - last_updated > timedelta(hours=24):
+                    logger.info(f"Очищення застарілої реєстрації для користувача {telegram_id}")
+                    user_state_manager.delete_user_state(telegram_id)
+                    return None
+        except Exception as e:
+            logger.warning(f"Помилка перевірки давності реєстрації для {telegram_id}: {e}")
+        
         return state
     return None
 
@@ -161,3 +229,107 @@ def complete_registration(telegram_id: int) -> bool:
     except Exception as e:
         logger.error(f"Помилка завершення реєстрації користувача {telegram_id}: {e}")
         return False
+
+# === НОВА СИСТЕМА СТАНІВ БОТА ===
+
+class BotState:
+    """Константи для станів бота"""
+    REGISTRATION = "registration"           # 1. Реєстрація або авторизація
+    AUTHORIZED_NO_TASKS = "authorized_no_tasks"  # 2. Авторизований, немає відкритих задач
+    AUTHORIZED_WITH_TASK = "authorized_with_task"  # 3. Авторизований, є відкрита задача
+
+def get_user_bot_state(telegram_id: int) -> str:
+    """Отримує поточний стан бота для користувача"""
+    try:
+        state = user_state_manager.load_user_state(telegram_id)
+        if not state:
+            logger.info(f"Користувач {telegram_id} не знайдений - стан: REGISTRATION")
+            return BotState.REGISTRATION
+        
+        # Перевіряємо тип стану
+        state_type = state.get("type", "")
+        
+        if state_type == "registration_in_progress":
+            logger.info(f"Користувач {telegram_id} в процесі реєстрації - стан: REGISTRATION")
+            return BotState.REGISTRATION
+        
+        if state_type in ["user_profile", "registration_completed"]:
+            # Користувач зареєстрований, перевіряємо наявність відкритих задач
+            bot_state = state.get("bot_state", {})
+            current_task = bot_state.get("current_task_key", "")
+            
+            if current_task:
+                logger.info(f"Користувач {telegram_id} має відкриту задачу {current_task} - стан: AUTHORIZED_WITH_TASK")
+                return BotState.AUTHORIZED_WITH_TASK
+            else:
+                logger.info(f"Користувач {telegram_id} авторизований без відкритих задач - стан: AUTHORIZED_NO_TASKS")
+                return BotState.AUTHORIZED_NO_TASKS
+        
+        # За замовчуванням - реєстрація
+        logger.warning(f"Невідомий стан користувача {telegram_id}: {state_type} - повертаємо REGISTRATION")
+        return BotState.REGISTRATION
+        
+    except Exception as e:
+        logger.error(f"Помилка отримання стану користувача {telegram_id}: {e}")
+        return BotState.REGISTRATION
+
+def set_user_bot_state(telegram_id: int, bot_state: str, task_key: str = "") -> bool:
+    """Встановлює стан бота для користувача"""
+    try:
+        # Завантажуємо поточний стан
+        current_state = user_state_manager.load_user_state(telegram_id)
+        if not current_state:
+            logger.warning(f"Неможливо встановити стан бота для неіснуючого користувача {telegram_id}")
+            return False
+        
+        # Додаємо або оновлюємо bot_state
+        if "bot_state" not in current_state:
+            current_state["bot_state"] = {}
+        
+        current_state["bot_state"]["state"] = bot_state
+        current_state["bot_state"]["last_updated"] = datetime.now().isoformat()
+        
+        if bot_state == BotState.AUTHORIZED_WITH_TASK and task_key:
+            current_state["bot_state"]["current_task_key"] = task_key
+        elif bot_state == BotState.AUTHORIZED_NO_TASKS:
+            current_state["bot_state"]["current_task_key"] = ""
+        
+        # Зберігаємо оновлений стан
+        result = user_state_manager.save_user_state(telegram_id, current_state)
+        logger.info(f"Встановлено стан бота для користувача {telegram_id}: {bot_state} (задача: {task_key})")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Помилка встановлення стану бота для користувача {telegram_id}: {e}")
+        return False
+
+def complete_user_registration_and_set_state(telegram_id: int) -> bool:
+    """Завершує реєстрацію і встановлює стан AUTHORIZED_NO_TASKS"""
+    try:
+        # Спочатку завершуємо реєстрацію
+        if complete_registration(telegram_id):
+            # Потім встановлюємо стан бота
+            return set_user_bot_state(telegram_id, BotState.AUTHORIZED_NO_TASKS)
+        return False
+    except Exception as e:
+        logger.error(f"Помилка завершення реєстрації та встановлення стану для {telegram_id}: {e}")
+        return False
+
+def set_user_current_task(telegram_id: int, task_key: str) -> bool:
+    """Встановлює поточну задачу користувача та змінює стан на AUTHORIZED_WITH_TASK"""
+    return set_user_bot_state(telegram_id, BotState.AUTHORIZED_WITH_TASK, task_key)
+
+def clear_user_current_task(telegram_id: int) -> bool:
+    """Очищає поточну задачу користувача та змінює стан на AUTHORIZED_NO_TASKS"""
+    return set_user_bot_state(telegram_id, BotState.AUTHORIZED_NO_TASKS)
+
+def get_user_current_task(telegram_id: int) -> str:
+    """Отримує ключ поточної задачі користувача"""
+    try:
+        state = user_state_manager.load_user_state(telegram_id)
+        if state and "bot_state" in state:
+            return state["bot_state"].get("current_task_key", "")
+        return ""
+    except Exception as e:
+        logger.error(f"Помилка отримання поточної задачі користувача {telegram_id}: {e}")
+        return ""

@@ -273,7 +273,7 @@ echo "# Bot startup: $(date)" > logs/bot_new.log
 echo "export TELEGRAM_BOT_RESTART_TIME=$(date +%s)" >> logs/bot_new.log
 
 # Запуск бота с дополнительными параметрами для обнаружения проблем
-cd /root/simple_bot && nohup python3 src/main.py > logs/bot_new.log 2>&1 &
+cd /home/Bot1 && source venv/bin/activate && export PYTHONPATH=/home/Bot1:$PYTHONPATH && nohup python src/main.py > logs/bot_new.log 2>&1 &
 BOT_PID=$!
 echo "Started bot with PID: $BOT_PID"
 

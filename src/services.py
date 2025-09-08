@@ -979,28 +979,91 @@ async def add_comment_with_file_reference_to_jira(issue_key: str, comment: str, 
     logger = logging.getLogger(__name__)
     
     # Спочатку прикріплюємо файл, якщо він є
+    attachment_url = None
     if filename and file_content:
         try:
-            await attach_file_to_jira(issue_key, filename, file_content)
+            attachment_response = await attach_file_to_jira(issue_key, filename, file_content)
             logger.info(f"Файл {filename} успішно прикріплено до {issue_key}")
+            
+            # Отримуємо URL прикріпленого файлу
+            if attachment_response and len(attachment_response) > 0:
+                attachment_id = attachment_response[0].get('id')
+                if attachment_id:
+                    attachment_url = f"{JIRA_BASE_URL}/secure/attachment/{attachment_id}/{filename}"
+                    logger.info(f"URL файлу: {attachment_url}")
         except Exception as e:
             logger.error(f"Помилка при прикріпленні файлу {filename} до {issue_key}: {str(e)}")
             # Продовжуємо навіть якщо файл не вдалось прикріпити
     
-    # Формуємо коментар з посиланням на файл
-    if filename:
-        if comment and comment.strip():
-            full_comment = f"{comment}\n\nПрикріплено файл: {filename}"
-        else:
-            full_comment = f"Прикріплено файл: {filename}"
+    # Додаємо заголовок автора, якщо вказано
+    if author_name:
+        header_text = f"**Ім'я: {author_name} додав коментар:**\n\n"
     else:
-        full_comment = comment if comment else "Файл прикріплено"
+        header_text = ""
     
-    # Додаємо коментар
-    try:
-        await add_comment_to_jira(issue_key, full_comment, author_name)
-        logger.info(f"Коментар з посиланням на файл успішно додано до {issue_key}")
-    except Exception as e:
-        logger.error(f"Помилка при додаванні коментаря з посиланням на файл до {issue_key}: {str(e)}")
-        raise
+    # Формуємо коментар з посиланням на файл у форматі ADF
+    if attachment_url and filename:
+        if comment and comment.strip():
+            full_comment_text = f"{header_text}{comment}\n\n"
+        else:
+            full_comment_text = f"{header_text}"
+        
+        # Створюємо коментар з посиланням на файл у форматі ADF
+        url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
+        
+        # ADF payload з посиланням на файл
+        adf_content = [
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "text": full_comment_text,
+                        "type": "text"
+                    }
+                ]
+            }
+        ]
+        
+        # Додаємо посилання на файл
+        adf_content.append({
+            "type": "paragraph",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "📎 Прикріплено файл: "
+                },
+                {
+                    "type": "text",
+                    "text": filename,
+                    "marks": [
+                        {
+                            "type": "link",
+                            "attrs": {
+                                "href": attachment_url,
+                                "title": filename
+                            }
+                        }
+                    ]
+                }
+            ]
+        })
+        
+        payload = {
+            "body": {
+                "type": "doc",
+                "version": 1,
+                "content": adf_content
+            }
+        }
+        
+        try:
+            await _make_request("POST", url, json=payload, headers=HEADERS_JSON)
+            logger.info(f"Коментар з посиланням на файл успішно додано до {issue_key}")
+        except Exception as e:
+            logger.error(f"Помилка при додаванні коментаря з посиланням на файл до {issue_key}: {str(e)}")
+            raise
+    else:
+        # Якщо немає файлу або URL, створюємо звичайний коментар
+        full_comment = f"{header_text}{comment}" if comment else f"{header_text}Файл прикріплено"
+        await add_comment_to_jira(issue_key, full_comment, None)  # author_name вже додано до тексту
 

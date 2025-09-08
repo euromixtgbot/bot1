@@ -162,7 +162,7 @@ async def init_bot():
                       .build())
         
         # Реєструємо всі хендлери
-        from handlers import register_handlers
+        from src.handlers import register_handlers
         register_handlers(application)
         
         # Запускаємо бота
@@ -251,9 +251,23 @@ async def main():
             logger.info(f"  - Jira webhook сервер: активен на {WEBHOOK_HOST}:{WEBHOOK_PORT}")
         logger.info("Для остановки нажмите Ctrl+C")
         
+        # Импортируем менеджер пользователей для синхронизации
+        from user_management_service import user_manager
+        
         try:
+            sync_counter = 0
             while True:
-                await asyncio.sleep(1)
+                await asyncio.sleep(60)  # Перевірка кожну хвилину
+                sync_counter += 1
+                
+                # Кожні 10 хвилин запускаємо синхронізацію
+                if sync_counter % 10 == 0:
+                    try:
+                        result = user_manager.sync_pending_users()
+                        if result["synced"] > 0 or result["failed"] > 0:
+                            logger.info(f"🔄 Синхронізація: {result['synced']} успішно, {result['failed']} помилок")
+                    except Exception as e:
+                        logger.error(f"Помилка планової синхронізації: {e}")
         except KeyboardInterrupt:
             logger.info("Получена команда завершения")
         finally:
