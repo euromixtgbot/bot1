@@ -6,7 +6,7 @@
 # Зручний інтерфейс для управління моніторингом бота
 
 BOT_DIR="/home/Bot1"
-MONITOR_SCRIPT="$BOT_DIR/monitor_bot.sh"
+MONITOR_SCRIPT="$BOT_DIR/monitoring/monitor_bot.sh"
 
 # Кольори
 RED='\033[0;31m'

@@ -6,8 +6,8 @@
 # Цей скрипт налаштовує систему моніторингу бота
 
 BOT_DIR="/home/Bot1"
-MONITOR_SCRIPT="$BOT_DIR/monitor_bot.sh"
-SERVICE_FILE="$BOT_DIR/bot-monitor.service"
+MONITOR_SCRIPT="$BOT_DIR/monitoring/monitor_bot.sh"
+SERVICE_FILE="$BOT_DIR/monitoring/bot-monitor.service"
 SYSTEMD_SERVICE="/etc/systemd/system/bot-monitor.service"
 
 # Кольори
