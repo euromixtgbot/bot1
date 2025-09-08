@@ -37,9 +37,13 @@ config/service_account.json
 .env*
 
 # Logs
-logs/*.log
-*.log
+logs/*.log*
+logs/
+*.log*
 *.lock
+nohup.out
+webhook*.log
+bot*.log
 
 # Temporary files
 *.tmp
