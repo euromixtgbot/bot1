@@ -4,7 +4,7 @@
 
 ```bash
 # 1. Завантаження та запуск автоматичного скрипта
-wget https://raw.githubusercontent.com/euromixtgbot/bot1/main/auto_deploy.sh
+wget https://raw.githubusercontent.com/euromixtgbot/bot1/main/deployment/auto_deploy.sh
 sudo chmod +x auto_deploy.sh
 sudo ./auto_deploy.sh
 

@@ -3,17 +3,27 @@
         "src",
         "config", 
         "utils",
-        "tests"
+        "Tests",
+        "scripts",
+        "monitoring",
+        "user_states"
     ],
     "exclude": [
         "**/node_modules",
         "**/__pycache__",
-        "**/*.pyc"
+        "**/*.pyc",
+        "logs/**",
+        "venv/**",
+        "backups/**",
+        ".git/**"
     ],
     "extraPaths": [
         "./src",
         "./config",
-        "./utils"
+        "./utils",
+        "./scripts",
+        "./monitoring",
+        "./user_states"
     ],
     "pythonVersion": "3.12",
     "pythonPlatform": "Linux",

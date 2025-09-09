@@ -583,23 +583,36 @@ ping google.com
 
 ## 11. РЕЗЕРВНЕ КОПІЮВАННЯ
 
-### Крок 11.1: Створення backup скрипта
+### Крок 11.1: Безпечна система backup
 ```bash
 cd /home/Bot1
 
-# Створення скрипта backup
-cat > create_backup.sh << 'EOF'
+# Перевірка наявності безпечної системи backup
+if [[ -f "backups/create_secure_backup.sh" ]]; then
+    echo "✅ Безпечна система backup вже доступна"
+    chmod +x backups/create_secure_backup.sh
+    
+    # Створення зручного посилання
+    ln -sf backups/create_secure_backup.sh create_backup.sh
+    
+    # Перегляд документації
+    cat backups/README.md
+else
+    echo "⚠️ Безпечна система backup не знайдена, створюємо простий варіант"
+    
+    # Створення простого скрипта backup
+    cat > create_backup.sh << 'EOF'
 #!/bin/bash
 
-# Скрипт для створення резервної копії бота
+# Простий скрипт для створення резервної копії бота
 BACKUP_DIR="/home/Bot1/backups"
 DATE=$(date '+%Y%m%d_%H%M%S')
-BACKUP_NAME="Bot1_backup_${DATE}"
+BACKUP_NAME="Bot1_simple_backup_${DATE}"
 
 # Створення директорії для backup
 mkdir -p "$BACKUP_DIR"
 
-# Створення архіву (без логів та кешу)
+# Створення архіву (без логів, конфіденційних даних та кешу)
 cd /home
 tar -czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" \
     --exclude='Bot1/logs/*' \
@@ -607,26 +620,49 @@ tar -czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" \
     --exclude='Bot1/__pycache__' \
     --exclude='Bot1/*/__pycache__' \
     --exclude='Bot1/user_states/*.json' \
+    --exclude='Bot1/config/credentials.env' \
+    --exclude='Bot1/config/service_account.json' \
     Bot1/
 
 echo "✅ Backup створено: ${BACKUP_DIR}/${BACKUP_NAME}.tar.gz"
 ls -lh "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz"
 EOF
 
-chmod +x create_backup.sh
+    chmod +x create_backup.sh
+fi
 ```
 
-### Крок 11.2: Автоматичні backup через cron
+### Крок 11.2: Використання безпечного backup
+```bash
+# Створення безпечного backup (рекомендовано)
+./backups/create_secure_backup.sh
+
+# АБО використання простого варіанту
+./create_backup.sh
+
+# Перевірка створеного backup
+ls -la backups/*.tar.gz
+```
+
+### Крок 11.3: Автоматичні backup через cron
 ```bash
 # Редагування crontab
 crontab -e
 
-# Додавання записів (backup кожен день о 3:00)
-0 3 * * * /home/Bot1/create_backup.sh >> /home/Bot1/logs/backup.log 2>&1
+# Додавання записів (безпечний backup кожен день о 3:00)
+0 3 * * * /home/Bot1/backups/create_secure_backup.sh >> /home/Bot1/logs/backup.log 2>&1
 
 # Очищення старих backup (старше 30 днів)
 0 4 * * * find /home/Bot1/backups -name "*.tar.gz" -mtime +30 -delete
 ```
+
+### Крок 11.4: Переваги безпечної системи backup
+- ✅ **Виключає конфіденційні дані** (токени, паролі)
+- ✅ **Виключає логи** (можуть містити чутливу інформацію)
+- ✅ **Компактний розмір** (~484KB замість мегабайтів)
+- ✅ **Повна документація** відновлення
+- ✅ **Автоматична перевірка** безпеки
+- ✅ **Готові шаблони** конфігурації
 
 ### Крок 11.3: Ручне створення backup
 ```bash

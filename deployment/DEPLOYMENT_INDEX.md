@@ -34,7 +34,7 @@
 ### 🤖 Повне автоматичне розгортання:
 ```bash
 # Завантаження та запуск
-wget https://raw.githubusercontent.com/euromixtgbot/bot1/main/auto_deploy.sh
+wget https://raw.githubusercontent.com/euromixtgbot/bot1/main/deployment/auto_deploy.sh
 sudo chmod +x auto_deploy.sh
 sudo ./auto_deploy.sh
 ```
@@ -47,7 +47,10 @@ sudo /home/Bot1/monitoring/setup_monitoring.sh
 # Контроль моніторингу
 /home/Bot1/monitor_control.sh
 
-# Створення backup
+# Створення безпечного backup
+/home/Bot1/backups/create_secure_backup.sh
+
+# АБО простий backup
 /home/Bot1/create_backup.sh
 ```
 

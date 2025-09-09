@@ -351,17 +351,31 @@ setup_monitoring() {
     fi
 }
 
-# Створення backup скрипта
-create_backup_script() {
-    log "INFO" "💾 Створення скрипта резервного копіювання..."
+# Налаштування системи backup
+setup_backup_system() {
+    log "INFO" "💾 Налаштування системи безпечного резервного копіювання..."
     
-    cat > "$BOT_DIR/create_backup.sh" << 'EOF'
+    cd "$BOT_DIR"
+    
+    # Перевірка наявності системи backup
+    if [[ -f "backups/create_secure_backup.sh" ]]; then
+        chmod +x backups/create_secure_backup.sh
+        log "INFO" "✅ Безпечна система backup налаштована"
+        
+        # Створення символічного посилання для зручності
+        ln -sf backups/create_secure_backup.sh create_backup.sh
+        log "INFO" "✅ Створено зручне посилання: ./create_backup.sh"
+    else
+        log "WARNING" "⚠️ Система backup backups/create_secure_backup.sh не знайдена"
+        log "INFO" "💾 Створення простого backup скрипта..."
+        
+        cat > "$BOT_DIR/create_backup.sh" << 'EOF'
 #!/bin/bash
 
-# Скрипт для створення резервної копії бота
+# Простий скрипт для створення резервної копії бота
 BACKUP_DIR="/home/Bot1/backups"
 DATE=$(date '+%Y%m%d_%H%M%S')
-BACKUP_NAME="Bot1_backup_${DATE}"
+BACKUP_NAME="Bot1_simple_backup_${DATE}"
 
 # Створення директорії для backup
 mkdir -p "$BACKUP_DIR"
@@ -374,15 +388,17 @@ tar -czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" \
     --exclude='Bot1/__pycache__' \
     --exclude='Bot1/*/__pycache__' \
     --exclude='Bot1/user_states/*.json' \
+    --exclude='Bot1/config/credentials.env' \
+    --exclude='Bot1/config/service_account.json' \
     Bot1/
 
 echo "✅ Backup створено: ${BACKUP_DIR}/${BACKUP_NAME}.tar.gz"
 ls -lh "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz"
 EOF
 
-    chmod +x "$BOT_DIR/create_backup.sh"
-    
-    log "INFO" "✅ Скрипт backup створено"
+        chmod +x "$BOT_DIR/create_backup.sh"
+        log "INFO" "✅ Простий скрипт backup створено"
+    fi
 }
 
 # Фінальна перевірка
@@ -476,9 +492,13 @@ show_next_steps() {
     
     echo -e "${BLUE}6. Створення backup:${NC}"
     echo "   $BOT_DIR/create_backup.sh"
+    echo "   # АБО використовуйте безпечну систему:"
+    echo "   $BOT_DIR/backups/create_secure_backup.sh"
     echo ""
     
-    echo -e "${GREEN}📚 Детальна документація: $BOT_DIR/DEPLOYMENT_GUIDE.md${NC}"
+    echo -e "${GREEN}📚 Детальна документація: $BOT_DIR/deployment/DEPLOYMENT_GUIDE.md${NC}"
+    echo -e "${GREEN}🗂️ Система звітів: $BOT_DIR/reports/ (організовано за датами)${NC}"
+    echo -e "${GREEN}💾 Система backup: $BOT_DIR/backups/README.md${NC}"
     echo -e "${GREEN}🆘 У разі проблем: $BOT_DIR/README.md${NC}"
 }
 
@@ -511,7 +531,7 @@ main() {
     set_permissions
     create_systemd_services
     setup_monitoring
-    create_backup_script
+    setup_backup_system
     
     # Фінальна перевірка
     if final_check; then
