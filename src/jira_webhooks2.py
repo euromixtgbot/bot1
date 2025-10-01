@@ -58,6 +58,15 @@ EVENT_COMMENT_CREATED = "comment_created"
 EVENT_ISSUE_CREATED = "jira:issue_created"
 EVENT_ATTACHMENT_CREATED = "attachment_created"
 
+# Типи подій, які ми логуємо але не обробляємо
+EVENT_ISSUE_PROPERTY_SET = "issue_property_set"
+EVENT_ISSUELINK_CREATED = "issuelink_created"
+EVENT_WORKLOG_CREATED = "worklog_created"
+EVENT_WORKLOG_UPDATED = "worklog_updated"
+EVENT_WORKLOG_DELETED = "worklog_deleted"
+EVENT_USER_CREATED = "user_created"
+EVENT_USER_UPDATED = "user_updated"
+
 # Кеш для зберігання відправлених повідомлень, щоб уникнути дублікатів
 # Структура: {issue_key: [{"text": "message_text", "time": timestamp}]]}
 # Зберігаємо тільки останні повідомлення за останні 5 хвилин
@@ -119,6 +128,15 @@ async def handle_webhook(request: web.Request) -> web.Response:
             handler = handle_issue_created
         elif event_type == EVENT_ATTACHMENT_CREATED:
             handler = handle_attachment_created
+        elif event_type in [EVENT_ISSUE_PROPERTY_SET, EVENT_ISSUELINK_CREATED, 
+                           EVENT_WORKLOG_CREATED, EVENT_WORKLOG_UPDATED, EVENT_WORKLOG_DELETED,
+                           EVENT_USER_CREATED, EVENT_USER_UPDATED]:
+            # Логуємо інформаційні події без обробки
+            logger.info(f"ℹ️ Info event received: {event_type} - logging only, no action taken")
+            issue_key = webhook_data.get('issue', {}).get('key', 'N/A')
+            if issue_key != 'N/A':
+                logger.info(f"   Issue: {issue_key}")
+            return web.json_response({"status": "success", "message": f"Info event logged: {event_type}"})
         else:
             logger.warning(f"Unsupported event type: {event_type}")
             return web.json_response({"status": "error", "message": f"Unsupported event type: {event_type}"}, status=400)
@@ -173,11 +191,12 @@ async def validate_webhook_data(data: Dict[str, Any], event_type: str) -> bool:
                  # Allow issue key to be extracted from attachment URL
                  any(url_field in data.get('attachment', {}) for url_field in ['self', 'content', 'url']))
             )
-        # Handle 'issue_property_set' event type
-        elif event_type == 'issue_property_set':
-            # Add specific validation for 'issue_property_set' if needed, or simply return True if no specific validation is required yet.
-            # For now, let's assume it's valid if it has an issue key.
-            return bool(data.get('issue', {}).get('key'))
+        
+        # Інформаційні події - завжди валідні (логуємо але не обробляємо)
+        elif event_type in [EVENT_ISSUE_PROPERTY_SET, EVENT_ISSUELINK_CREATED,
+                           EVENT_WORKLOG_CREATED, EVENT_WORKLOG_UPDATED, EVENT_WORKLOG_DELETED,
+                           EVENT_USER_CREATED, EVENT_USER_UPDATED]:
+            return True
             
         return False
         
