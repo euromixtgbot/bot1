@@ -20,7 +20,11 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
-from config.config import JIRA_DOMAIN, JIRA_API_TOKEN, JIRA_EMAIL, JIRA_REPORTER_ACCOUNT_ID, TELEGRAM_TOKEN
+from config.config import (
+    JIRA_DOMAIN, JIRA_API_TOKEN, JIRA_EMAIL, JIRA_REPORTER_ACCOUNT_ID, TELEGRAM_TOKEN,
+    WEBHOOK_RATE_LIMIT_ENABLED, WEBHOOK_RATE_LIMIT_MAX_REQUESTS, WEBHOOK_RATE_LIMIT_WINDOW,
+    WEBHOOK_RATE_LIMIT_BLACKLIST_DURATION, WEBHOOK_IP_WHITELIST_ENABLED, WEBHOOK_IP_WHITELIST_CUSTOM
+)
 from src.services import find_user_by_jira_issue_key
 from src.fixed_issue_formatter import format_issue_info, format_issue_text
 from src.jira_attachment_utils import build_attachment_urls, download_file_from_jira, normalize_jira_domain
@@ -57,6 +61,208 @@ EVENT_ISSUE_UPDATED = "jira:issue_updated"
 EVENT_COMMENT_CREATED = "comment_created"
 EVENT_ISSUE_CREATED = "jira:issue_created"
 EVENT_ATTACHMENT_CREATED = "attachment_created"
+
+# === SECURITY: Rate Limiting and IP Whitelist ===
+# Rate limiting: максимум запитів з одного IP за вікно часу
+RATE_LIMIT_WINDOW = WEBHOOK_RATE_LIMIT_WINDOW  # секунд (з config)
+RATE_LIMIT_MAX_REQUESTS = WEBHOOK_RATE_LIMIT_MAX_REQUESTS  # максимум запитів за вікно (з config)
+RATE_LIMIT_BLACKLIST_DURATION = WEBHOOK_RATE_LIMIT_BLACKLIST_DURATION  # тривалість блокування (з config)
+
+# IP Whitelist: дозволені IP-адреси для webhook запитів
+# Jira Cloud IP ranges (оновлено станом на 2025)
+IP_WHITELIST = {
+    # Localhost для тестування
+    "127.0.0.1",
+    "::1",
+    
+    # Jira Cloud IP ranges (Atlassian)
+    # https://support.atlassian.com/organization-administration/docs/ip-addresses-and-domains-for-atlassian-cloud-products/
+    "13.52.5.0/24",
+    "13.236.8.0/21",
+    "18.136.0.0/16",
+    "18.184.0.0/16",
+    "18.234.32.0/20",
+    "18.246.0.0/16",
+    "52.215.192.0/21",
+    "104.192.136.0/21",
+    "185.166.140.0/22",
+    "185.166.142.0/23",
+    "185.166.143.0/24",
+    
+    # Внутрішня мережа (якщо потрібно)
+    "192.168.0.0/16",
+    "10.0.0.0/8",
+}
+
+# Додаємо custom IP з config
+if WEBHOOK_IP_WHITELIST_CUSTOM:
+    for ip in WEBHOOK_IP_WHITELIST_CUSTOM.split(','):
+        ip = ip.strip()
+        if ip:
+            IP_WHITELIST.add(ip)
+            logger.info(f"✅ Added custom IP to whitelist from config: {ip}")
+
+# Глобальні структури для rate limiting
+from collections import deque
+RATE_LIMIT_TRACKER: Dict[str, deque] = defaultdict(lambda: deque(maxlen=RATE_LIMIT_MAX_REQUESTS))
+RATE_LIMIT_BLACKLIST: Dict[str, float] = {}  # {ip: blacklist_until_timestamp}
+
+def is_ip_in_whitelist(ip: str) -> bool:
+    """
+    Перевіряє чи IP-адреса в whitelist (включаючи підмережі CIDR).
+    
+    Args:
+        ip: IP-адреса для перевірки
+        
+    Returns:
+        bool: True якщо IP дозволений
+    """
+    from ipaddress import ip_address, ip_network
+    
+    try:
+        ip_obj = ip_address(ip)
+        for allowed in IP_WHITELIST:
+            if '/' in allowed:
+                # CIDR notation
+                if ip_obj in ip_network(allowed, strict=False):
+                    return True
+            else:
+                # Exact IP match
+                if str(ip_obj) == allowed:
+                    return True
+        return False
+    except ValueError:
+        logger.warning(f"Invalid IP address format: {ip}")
+        return False
+
+def check_rate_limit(ip: str) -> Tuple[bool, str]:
+    """
+    Перевіряє rate limit для IP-адреси.
+    
+    Args:
+        ip: IP-адреса для перевірки
+        
+    Returns:
+        Tuple[bool, str]: (дозволений, причина блокування)
+    """
+    current_time = time.time()
+    
+    # Перевірка чи IP в чорному списку
+    if ip in RATE_LIMIT_BLACKLIST:
+        blacklist_until = RATE_LIMIT_BLACKLIST[ip]
+        if current_time < blacklist_until:
+            remaining = int(blacklist_until - current_time)
+            return False, f"IP blacklisted for {remaining}s (rate limit exceeded)"
+        else:
+            # Час блокування закінчився
+            del RATE_LIMIT_BLACKLIST[ip]
+            RATE_LIMIT_TRACKER[ip].clear()
+    
+    # Отримуємо історію запитів для цього IP
+    request_times = RATE_LIMIT_TRACKER[ip]
+    
+    # Видаляємо старі запити (поза вікном)
+    while request_times and request_times[0] < current_time - RATE_LIMIT_WINDOW:
+        request_times.popleft()
+    
+    # Перевіряємо ліміт
+    if len(request_times) >= RATE_LIMIT_MAX_REQUESTS:
+        # Перевищено ліміт - додаємо в чорний список
+        RATE_LIMIT_BLACKLIST[ip] = current_time + RATE_LIMIT_BLACKLIST_DURATION
+        logger.warning(f"🚫 Rate limit exceeded for IP {ip}: {len(request_times)} requests in {RATE_LIMIT_WINDOW}s. Blacklisted for {RATE_LIMIT_BLACKLIST_DURATION}s")
+        return False, f"Rate limit exceeded: {len(request_times)}/{RATE_LIMIT_MAX_REQUESTS} requests per {RATE_LIMIT_WINDOW}s"
+    
+    # Додаємо поточний запит
+    request_times.append(current_time)
+    return True, ""
+
+@web.middleware
+async def security_middleware(request: web.Request, handler) -> web.Response:
+    """
+    Middleware для перевірки безпеки запитів (IP whitelist, rate limiting).
+    
+    Args:
+        request: Вхідний запит
+        handler: Наступний обробник
+        
+    Returns:
+        web.Response: Відповідь
+    """
+    # Отримуємо IP-адресу клієнта
+    # Враховуємо proxy (X-Forwarded-For, X-Real-IP)
+    client_ip = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+    if not client_ip:
+        client_ip = request.headers.get('X-Real-IP', '').strip()
+    if not client_ip:
+        client_ip = request.remote or '0.0.0.0'
+    
+    # Перевірка 1: IP Whitelist (якщо увімкнена)
+    if WEBHOOK_IP_WHITELIST_ENABLED:
+        if not is_ip_in_whitelist(client_ip):
+            logger.warning(f"🚫 Blocked request from non-whitelisted IP: {client_ip} (path: {request.path})")
+            return web.json_response(
+                {"status": "error", "message": "Access denied"},
+                status=403
+            )
+    
+    # Перевірка 2: Rate Limiting (якщо увімкнена)
+    if WEBHOOK_RATE_LIMIT_ENABLED:
+        allowed, reason = check_rate_limit(client_ip)
+        if not allowed:
+            logger.warning(f"🚫 Blocked request from {client_ip}: {reason}")
+            return web.json_response(
+                {"status": "error", "message": "Too many requests"},
+                status=429
+            )
+    
+    # Запит дозволений
+    return await handler(request)
+
+def add_ip_to_whitelist(ip: str) -> bool:
+    """
+    Додає IP-адресу до whitelist (для адміністративного використання).
+    
+    Args:
+        ip: IP-адреса або CIDR підмережа
+        
+    Returns:
+        bool: True якщо успішно додано
+    """
+    try:
+        from ipaddress import ip_address, ip_network
+        
+        # Валідація
+        if '/' in ip:
+            ip_network(ip, strict=False)  # Перевірка CIDR
+        else:
+            ip_address(ip)  # Перевірка IP
+        
+        IP_WHITELIST.add(ip)
+        logger.info(f"✅ Added IP to whitelist: {ip}")
+        return True
+    except ValueError as e:
+        logger.error(f"❌ Invalid IP format: {ip} - {e}")
+        return False
+
+def remove_ip_from_blacklist(ip: str) -> bool:
+    """
+    Видаляє IP-адресу з blacklist (для адміністративного використання).
+    
+    Args:
+        ip: IP-адреса
+        
+    Returns:
+        bool: True якщо успішно видалено
+    """
+    if ip in RATE_LIMIT_BLACKLIST:
+        del RATE_LIMIT_BLACKLIST[ip]
+        if ip in RATE_LIMIT_TRACKER:
+            RATE_LIMIT_TRACKER[ip].clear()
+        logger.info(f"✅ Removed IP from blacklist: {ip}")
+        return True
+    else:
+        logger.warning(f"⚠️ IP not in blacklist: {ip}")
+        return False
 
 # Типи подій, які ми логуємо але не обробляємо
 EVENT_ISSUE_PROPERTY_SET = "issue_property_set"
@@ -1555,7 +1761,10 @@ async def setup_webhook_server(app, host: str, port: int, ssl_context: Optional[
         ssl_context: SSL-контекст для захищеного з'єднання
     """
     # Створюємо веб-застосунок aiohttp з більшим максимальним розміром тіла запиту
-    web_app = web.Application(client_max_size=50 * 1024 * 1024)  # 50MB limit
+    web_app = web.Application(
+        client_max_size=50 * 1024 * 1024,  # 50MB limit
+        middlewares=[security_middleware]  # Додаємо security middleware
+    )
     
     # Налаштовуємо маршрути
     web_app.router.add_post('/rest/webhooks/webhook1', handle_webhook)
@@ -1569,6 +1778,49 @@ async def setup_webhook_server(app, host: str, port: int, ssl_context: Optional[
         })
         
     web_app.router.add_get('/rest/webhooks/ping', ping)
+    
+    # Додаємо endpoint для моніторингу security статусу
+    async def security_status(request):
+        """Endpoint для перевірки security статусу (rate limiting, blacklist)."""
+        current_time = time.time()
+        
+        # Інформація про blacklist
+        blacklisted_ips = []
+        for ip, until_time in RATE_LIMIT_BLACKLIST.items():
+            if until_time > current_time:
+                remaining = int(until_time - current_time)
+                blacklisted_ips.append({
+                    "ip": ip,
+                    "remaining_seconds": remaining
+                })
+        
+        # Інформація про rate limiting
+        active_ips = {}
+        for ip, requests in RATE_LIMIT_TRACKER.items():
+            # Видаляємо старі запити
+            while requests and requests[0] < current_time - RATE_LIMIT_WINDOW:
+                requests.popleft()
+            if requests:
+                active_ips[ip] = len(requests)
+        
+        return web.json_response({
+            "status": "ok",
+            "security": {
+                "rate_limit": {
+                    "window_seconds": RATE_LIMIT_WINDOW,
+                    "max_requests": RATE_LIMIT_MAX_REQUESTS,
+                    "blacklist_duration": RATE_LIMIT_BLACKLIST_DURATION,
+                    "active_ips": active_ips,
+                    "blacklisted_ips": blacklisted_ips
+                },
+                "ip_whitelist": {
+                    "enabled": True,
+                    "whitelist_size": len(IP_WHITELIST)
+                }
+            }
+        })
+    
+    web_app.router.add_get('/rest/webhooks/security-status', security_status)
     
     # Запускаємо веб-сервер
     runner = web.AppRunner(web_app)

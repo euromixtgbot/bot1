@@ -30,6 +30,16 @@ WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", 8443))
 SSL_CERT_PATH: str | None = os.getenv("SSL_CERT_PATH", None)
 SSL_KEY_PATH: str | None = os.getenv("SSL_KEY_PATH", None)
 
+# Webhook Security Settings
+WEBHOOK_RATE_LIMIT_ENABLED: bool = os.getenv("WEBHOOK_RATE_LIMIT_ENABLED", "true").lower() == "true"
+WEBHOOK_RATE_LIMIT_MAX_REQUESTS: int = int(os.getenv("WEBHOOK_RATE_LIMIT_MAX_REQUESTS", 100))
+WEBHOOK_RATE_LIMIT_WINDOW: int = int(os.getenv("WEBHOOK_RATE_LIMIT_WINDOW", 60))
+WEBHOOK_RATE_LIMIT_BLACKLIST_DURATION: int = int(os.getenv("WEBHOOK_RATE_LIMIT_BLACKLIST_DURATION", 3600))
+
+WEBHOOK_IP_WHITELIST_ENABLED: bool = os.getenv("WEBHOOK_IP_WHITELIST_ENABLED", "true").lower() == "true"
+# Додаткові IP для whitelist (через кому)
+WEBHOOK_IP_WHITELIST_CUSTOM: str = os.getenv("WEBHOOK_IP_WHITELIST_CUSTOM", "")
+
 # Google Sheets
 _google_creds_path = os.getenv("GOOGLE_CREDENTIALS_PATH") or ""
 if _google_creds_path and not os.path.isabs(_google_creds_path):
