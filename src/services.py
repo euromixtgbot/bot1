@@ -514,7 +514,7 @@ async def find_open_issues(telegram_id: str) -> List[Dict[str, str]]:
         f'AND "Telegram ID" ~ "{normalized_id}" '
         'AND statusCategory != Done'
     )
-    url = f"{JIRA_BASE_URL}/rest/api/3/search"
+    url = f"{JIRA_BASE_URL}/rest/api/3/search/jql"
     logger.info(f"find_open_issues: JQL запит: {jql}")
     
     response = await _make_request(
@@ -574,7 +574,7 @@ async def find_done_issues(telegram_id: str) -> List[Dict[str, str]]:
         f'AND "Telegram ID" ~ "{normalized_id}" '
         'AND statusCategory = Done'
     )
-    url = f"{JIRA_BASE_URL}/rest/api/3/search"
+    url = f"{JIRA_BASE_URL}/rest/api/3/search/jql"
     logger.info(f"find_done_issues: JQL запит: {jql}")
     
     response = await _make_request(
