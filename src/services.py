@@ -884,7 +884,7 @@ async def find_user_by_jira_issue_key(issue_key: str) -> Optional[Dict[str, Any]
         telegram_id = fields.get("customfield_10145")
         
         if not telegram_id:
-            logger.warning(f"No Telegram ID found for issue {issue_key}")
+            logger.info(f"No Telegram ID found for issue {issue_key} - likely created manually in Jira web interface")
             return None
             
         # Normalize the Telegram ID

@@ -309,7 +309,7 @@ async def handle_comment_created(webhook_data: Dict[str, Any]) -> None:
         # Find Telegram user
         user_data = await find_user_by_jira_issue_key(issue_key)
         if not user_data:
-            logger.warning(f"No Telegram user found for issue {issue_key}")
+            logger.info(f"No Telegram user found for issue {issue_key} - issue created manually in Jira, skipping notification")
             return
             
         logger.debug(f"Found Telegram user: {user_data}")
