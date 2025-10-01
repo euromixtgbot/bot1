@@ -34,15 +34,11 @@ from src.attachment_processor import process_attachments_for_issue
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
-# Створюємо окремий логер для вебхуків з ротацією
-webhook_log_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-webhook_log_filename = f'logs/webhook_001_{webhook_log_timestamp}.log'
-
-# Налаштовуємо ротуючий файловий хендлер для вебхуків (5MB максимум, 10 файлів)
+# Налаштовуємо ротуючий файловий хендлер для вебхуків (5MB максимум, 5 файлів)
 webhook_rotating_handler = RotatingFileHandler(
-    webhook_log_filename,
+    'logs/webhook.log',    # Фіксована назва для правильної ротації
     maxBytes=5*1024*1024,  # 5MB
-    backupCount=10,        # Зберігати до 10 файлів
+    backupCount=5,         # Зберігати до 5 файлів (webhook.log.1 ... webhook.log.5)
     encoding='utf-8'
 )
 

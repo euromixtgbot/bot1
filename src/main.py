@@ -31,15 +31,11 @@ os.makedirs('logs', exist_ok=True)
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
-# Створюємо назву файлу логу з порядковим номером і датою
-log_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_filename = f'logs/bot_001_{log_timestamp}.log'
-
-# Налаштовуємо ротуючий файловий хендлер (5MB максимум, 10 файлів)
+# Налаштовуємо ротуючий файловий хендлер (10MB максимум, 10 файлів)
 rotating_handler = RotatingFileHandler(
-    log_filename,
-    maxBytes=5*1024*1024,  # 5MB
-    backupCount=10,        # Зберігати до 10 файлів
+    'logs/bot.log',        # Фіксована назва для правильної ротації
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=10,        # Зберігати до 10 файлів (bot.log.1 ... bot.log.10)
     encoding='utf-8'
 )
 
@@ -51,6 +47,14 @@ logging.basicConfig(
         rotating_handler
     ]
 )
+
+# Зменшуємо рівень логування для шумних бібліотек
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('telegram.ext').setLevel(logging.WARNING)
+logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
+logging.getLogger('aiohttp.server').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # Глобальная переменная для хранения экземпляра приложения
