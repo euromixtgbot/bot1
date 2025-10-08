@@ -14,25 +14,14 @@ main_menu_markup = ReplyKeyboardMarkup(
     one_time_keyboard=False
 )
 
-# Кнопка для запиту контактів
+# Кнопка для запиту контактів (обов'язкова авторизація)
 contact_request_markup = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("📞 Надати номер телефону", request_contact=True)],
-        [KeyboardButton("🏠 Вийти на головну")]
+        [KeyboardButton("📞 Надати номер телефону", request_contact=True)]
     ],
     resize_keyboard=True,
-    one_time_keyboard=True
-)
-
-# Кнопка для запиту контактів при неуспішній авторизації
-failed_auth_markup = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("📞 Надати номер телефону", request_contact=True)],
-        [KeyboardButton("👤 Продовжити без авторизації")],
-        [KeyboardButton("🏠 Вийти на головну")]
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=True
+    one_time_keyboard=False,
+    input_field_placeholder="👇 Натисніть кнопку нижче"
 )
 
 # Кнопки після створення задачі

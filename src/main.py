@@ -31,6 +31,13 @@ os.makedirs('logs', exist_ok=True)
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
+# Отримуємо root logger
+root_logger = logging.getLogger()
+
+# Очищаємо всі існуючі handlers щоб запобігти дублюванню
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
 # Налаштовуємо ротуючий файловий хендлер (10MB максимум, 10 файлів)
 rotating_handler = RotatingFileHandler(
     'logs/bot.log',        # Фіксована назва для правильної ротації
@@ -39,14 +46,20 @@ rotating_handler = RotatingFileHandler(
     encoding='utf-8'
 )
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        rotating_handler
-    ]
-)
+# Створюємо formatter
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+rotating_handler.setFormatter(formatter)
+
+# Додаємо handlers до root logger
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(rotating_handler)
+
+# Додаємо console handler ТІЛЬКИ якщо stdout НЕ перенаправлено в файл
+# Це запобігає дублюванню логів коли бот запускається через nohup > file.log
+if sys.stdout.isatty():
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
 
 # Зменшуємо рівень логування для шумних бібліотек
 logging.getLogger('httpx').setLevel(logging.WARNING)

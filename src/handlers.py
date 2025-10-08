@@ -45,7 +45,6 @@ from src.field_mapping import FIELD_MAP
 from src.keyboards import (
     main_menu_markup,
     contact_request_markup,
-    failed_auth_markup,
     after_create_markup,
     service_selection_markup,
     confirm_issue_markup,
@@ -194,6 +193,10 @@ async def main_message_dispatcher(update: Update, context: ContextTypes.DEFAULT_
     logger.info(f"🔄 ДИСПЕТЧЕР: користувач {telegram_id}, стан: {user_state}, повідомлення: '{update.message.text[:50] if update.message.text else 'Non-text'}'")
     
     # 🔥 КРИТИЧНО: Перевіряємо чи користувач не в активному ConversationHandler
+    if context.user_data and context.user_data.get("in_conversation"):
+        logger.info(f"⚠️ Користувач {telegram_id} в активному Conversation (in_conversation=True) - пропускаємо диспетчер")
+        return  # Не обробляємо, передаємо ConversationHandler
+    
     # Якщо є context.user_data з ключами conversation, пропускаємо обробку
     if context.user_data and any(key in context.user_data for key in ['full_name', 'division', 'department', 'service', 'description']):
         logger.info(f"⚠️ Користувач {telegram_id} в активному Conversation - пропускаємо диспетчер")
@@ -259,10 +262,19 @@ async def handle_inline_issue_description(update: Update, context: ContextTypes.
         return
     
     # 🔥 КРИТИЧНО: Перевіряємо чи користувач не в активному ConversationHandler
-    # Якщо є context.user_data з ключами conversation, пропускаємо обробку
-    if context.user_data and any(key in context.user_data for key in ['full_name', 'division', 'department', 'service']):
-        logger.info(f"⚠️ Користувач в активному Conversation - пропускаємо inline handler")
+    if context.user_data and context.user_data.get("in_conversation"):
+        logger.info(f"⚠️ Користувач в активному Conversation (in_conversation=True) - пропускаємо inline handler")
         return  # Не обробляємо, передаємо ConversationHandler
+    
+    # Перевіряємо чи є будь-який ключ conversation в context
+    if context.user_data:
+        conversation_active = any(key in context.user_data for key in [
+            'full_name', 'division', 'department', 'service', 'mobile_number', 
+            'awaiting_contact', 'conversation_state'
+        ])
+        if conversation_active:
+            logger.info(f"⚠️ Користувач в активному Conversation - пропускаємо inline handler")
+            return  # Не обробляємо, передаємо ConversationHandler
     
     # Перевіряємо чи користувач очікує введення опису
     if not context.user_data.get("awaiting_description"):
@@ -1167,45 +1179,6 @@ async def create_task_button_handler(update: Update, context: ContextTypes.DEFAU
     return await create_issue_start(update, context)
 
 
-async def continue_without_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробник кнопки 'Продовжити без авторизації'"""
-    # Встановлюємо початкові дані для нового користувача
-    tg_id = str(update.effective_user.id)
-    tg_username = update.effective_user.username or ""
-    mobile_number = context.user_data.get("mobile_number", "")
-    
-    # Встановлюємо початкові дані для неавторизованого користувача
-    context.user_data["profile"] = None
-    context.user_data["telegram_id"] = tg_id
-    context.user_data["telegram_username"] = tg_username
-    if mobile_number:
-        context.user_data["mobile_number"] = mobile_number
-    
-    # Перевіряємо, чи перебуваємо в процесі створення заявки
-    if context.user_data.get("full_name"):
-        # Якщо так, то переходимо до наступного кроку
-        markup = ReplyKeyboardMarkup(
-            [[div] for div in DIVISIONS] + [["🔙 Назад"]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-        await update.message.reply_text(
-            "*Оберіть ваш підрозділ:*",
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
-        return DIVISION
-    else:
-        # Інакше просто показуємо головне меню
-        await update.message.reply_text(
-            "👤 *Ви продовжуєте без авторизації.* _При створенні задачі "
-            "вам потрібно буде вказати ваші контактні дані.\n"
-            "Ваші дані буде збережено для майбутніх звернень._",
-            reply_markup=main_menu_markup,
-            parse_mode="Markdown"
-        )
-
-
 async def my_issues(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показати список моїх відкритих задач у текстовому форматі"""
     profile = context.user_data.get("profile")
@@ -1443,10 +1416,17 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Автоматично додає коментар до відкритої задачі"""
     logger.info(f"comment_handler викликано! Текст повідомлення: '{update.message.text}'")
     
-    # ПЕРЕВІРКА: якщо користувач у процесі реєстрації, НЕ обробляємо
+    # ПЕРЕВІРКА 1: якщо користувач у процесі реєстрації, НЕ обробляємо
     registration_step = context.user_data.get("registration_step")
     if registration_step:
         logger.info(f"comment_handler: користувач у процесі реєстрації (крок: {registration_step}), ігноруємо це повідомлення")
+        return  # Просто виходимо, не обробляємо
+    
+    # ПЕРЕВІРКА 2: якщо користувач у процесі створення задачі (ConversationHandler активний), НЕ обробляємо
+    # Перевіряємо наявність даних, які встановлюються тільки в ConversationHandler
+    if context.user_data and any(key in context.user_data for key in ["full_name", "division", "department", "service", "description"]):
+        # Якщо є хоча б одне з цих полів - користувач у процесі створення задачі
+        logger.info(f"comment_handler: користувач у процесі створення задачі (ConversationHandler активний), ігноруємо")
         return  # Просто виходимо, не обробляємо
     
     # Перевіряємо, чи це не кнопка
@@ -1762,6 +1742,9 @@ async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def create_issue_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Початок створення задачі"""
+    # 🔥 Встановлюємо флаг активного conversation для блокування інших handlers
+    context.user_data["in_conversation"] = True
+    
     # Універсальна функція для роботи з message і callback_query
     async def send_message(text, reply_markup=None, parse_mode=None):
         if update.callback_query:
@@ -1886,7 +1869,10 @@ async def full_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = str(update.effective_user.id)
     logger.info(f"full_name_handler вызван, получено имя: '{full_name}', tg_id={tg_id}")
     
-    # 🔍 КРИТИЧНА ПЕРЕВІРКА: Якщо отримали кнопку з головного меню, завершуємо ConversationHandler
+    # � Встановлюємо флаг активного conversation для блокування інших handlers
+    context.user_data["in_conversation"] = True
+    
+    # �🔍 КРИТИЧНА ПЕРЕВІРКА: Якщо отримали кнопку з головного меню, завершуємо ConversationHandler
     if check_main_menu_button_and_exit(full_name, context, update):
         await update.message.reply_text(
             "🔄 *Повернення до головного меню*\n\n"
@@ -1894,6 +1880,7 @@ async def full_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_markup,
             parse_mode="Markdown"
         )
+        context.user_data.pop("in_conversation", None)  # Очищаємо флаг
         return ConversationHandler.END
     
     if len(full_name) < 2:
@@ -1907,65 +1894,121 @@ async def full_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["full_name"] = full_name
     logger.info(f"Збережено ім'я користувача: {full_name}")
     
-    # Запитуємо номер телефону
+    # Запитуємо номер телефону з чітким повідомленням про обов'язковість авторизації
     await update.message.reply_text(
-        "*Будь ласка, введіть ваш номер телефону* _у форматі +380XXXXXXXXX або натисніть кнопку 'Надати номер телефону':_",
+        "📞 *Для продовження необхідна авторизація!*\n\n"
+        "⚠️ *Увага:* Без авторизації бот не працює і не створює задачі в Jira.\n\n"
+        "🔐 *Натисніть кнопку нижче* '📞 Надати номер телефону' для авторизації:",
         reply_markup=contact_request_markup,
         parse_mode="Markdown"
     )
     logger.info(f"Перехід до MOBILE_NUMBER для tg_id={tg_id}")
     return MOBILE_NUMBER
 
-async def mobile_number_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробка введеного номера телефону"""
-    mobile_number = update.message.text.strip()
-    tg_id = str(update.effective_user.id)
-    logger.info(f"mobile_number_handler викликано, отримано номер: '{mobile_number}', tg_id={tg_id}")
-    
-    # 🔍 КРИТИЧНА ПЕРЕВІРКА: Якщо отримали кнопку з головного меню, завершуємо ConversationHandler
-    if check_main_menu_button_and_exit(mobile_number, context, update):
-        await update.message.reply_text(
-            "🔄 *Повернення до головного меню*\n\n"
-            "Для створення нової задачі натисніть *'🆕 Створити задачу'*.",
-            reply_markup=main_menu_markup,
-            parse_mode="Markdown"
-        )
-        return ConversationHandler.END
-    
-    # Валідація: перевіряємо формат тільки для введених з клавіатури номерів
-    # Номери отримані через кнопку "Надати номер телефону" завжди валідні
-    is_from_keyboard = not (update.message.contact is not None)
-    
-    if is_from_keyboard:
-        is_valid, error_message = validate_phone_format(mobile_number)
-        if not is_valid:
-            await update.message.reply_text(
-                f"❌ *Некоректний формат номера телефону*\n\n"
-                f"🚫 **Помилка:** {error_message}\n\n"
-                f"📱 *Правильний формат:* `+380XXXXXXXXX`\n"
-                f"💡 *Приклад:* `+380123456789`\n\n"
-                f"_Або натисніть кнопку 'Надати номер телефону' для автоматичного надання._",
-                reply_markup=contact_request_markup,
-                parse_mode="Markdown"
-            )
-            return MOBILE_NUMBER
-    
-    # Зберігаємо номер телефону
-    context.user_data["mobile_number"] = mobile_number
-    
-    # Переходимо до вибору підрозділу
-    markup = ReplyKeyboardMarkup(
-        [[div] for div in DIVISIONS] + [["🔙 Назад"]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
+async def remind_to_use_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Нагадує користувачу натиснути кнопку для надання контакту"""
     await update.message.reply_text(
-        "*Оберіть ваш підрозділ:*",
-        reply_markup=markup,
+        "⚠️ *Будь ласка, натисніть кнопку нижче* для надання контакту.\n\n"
+        "📱 Просто введення тексту не працює - потрібно натиснути кнопку "
+        "*'📞 Надати номер телефону'*",
+        reply_markup=contact_request_markup,
         parse_mode="Markdown"
     )
-    logger.info(f"Перехід до DIVISION для tg_id={tg_id}")
-    return DIVISION
+    logger.info(f"remind_to_use_button: нагадав користувачу {update.effective_user.id} натиснути кнопку")
+    return MOBILE_NUMBER
+
+async def reject_any_action_during_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Відхиляє будь-які дії (фото, відео, документи, стікери тощо) під час авторизації"""
+    
+    # Визначаємо тип медіа
+    media_type = "медіафайл"
+    if update.message.photo:
+        media_type = "фото"
+    elif update.message.video:
+        media_type = "відео"
+    elif update.message.document:
+        media_type = "документ"
+    elif update.message.sticker:
+        media_type = "стікер"
+    elif update.message.voice:
+        media_type = "голосове повідомлення"
+    elif update.message.audio:
+        media_type = "аудіо"
+    elif update.message.video_note:
+        media_type = "відеоповідомлення"
+    
+    await update.message.reply_text(
+        f"❌ *Не можна відправляти {media_type} під час авторизації!*\n\n"
+        "📞 Будь ласка, натисніть кнопку нижче '📞 Надати номер телефону' для авторизації.\n\n"
+        "⚠️ *Увага:* Без авторизації бот не працює і не створює задачі.",
+        reply_markup=contact_request_markup,
+        parse_mode="Markdown"
+    )
+    logger.info(f"reject_any_action_during_auth: відхилено {media_type} від користувача {update.effective_user.id}")
+    return MOBILE_NUMBER
+
+
+async def global_awaiting_auth_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Глобальний handler для текстових повідомлень ДО авторизації.
+    Спрацьовує якщо користувач НЕ авторизований і намагається відправити текст.
+    """
+    telegram_id = update.effective_user.id
+    
+    # Перевіряємо чи користувач авторизований
+    user_data, _ = await user_manager.find_user_comprehensive(telegram_id)
+    
+    if not user_data and not context.user_data.get("profile"):
+        # Користувач НЕ авторизований - показуємо повідомлення
+        await update.message.reply_text(
+            "⚠️ *Будь ласка, натисніть кнопку нижче* для надання контакту.\n\n"
+            "📱 Просто введення тексту не працює - потрібно натиснути кнопку "
+            "*'📞 Надати номер телефону'*\n\n"
+            "⚠️ *Увага:* Без авторизації бот не працює.",
+            reply_markup=contact_request_markup,
+            parse_mode="Markdown"
+        )
+        logger.info(f"global_awaiting_auth_text_handler: нагадав неавторизованому користувачу {telegram_id} натиснути кнопку")
+
+
+async def global_awaiting_auth_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Глобальний handler для медіафайлів ДО авторизації.
+    Спрацьовує якщо користувач НЕ авторизований і намагається відправити медіа.
+    """
+    telegram_id = update.effective_user.id
+    
+    # Перевіряємо чи користувач авторизований
+    user_data, _ = await user_manager.find_user_comprehensive(telegram_id)
+    
+    if not user_data and not context.user_data.get("profile"):
+        # Визначаємо тип медіа
+        media_type = "медіафайл"
+        if update.message.photo:
+            media_type = "фото"
+        elif update.message.video:
+            media_type = "відео"
+        elif update.message.document:
+            media_type = "документ"
+        elif update.message.sticker:
+            media_type = "стікер"
+        elif update.message.voice:
+            media_type = "голосове повідомлення"
+        elif update.message.audio:
+            media_type = "аудіо"
+        elif update.message.video_note:
+            media_type = "відеоповідомлення"
+        
+        # Користувач НЕ авторизований - показуємо повідомлення
+        await update.message.reply_text(
+            f"❌ *Не можна відправляти {media_type} без авторизації!*\n\n"
+            "📞 Будь ласка, натисніть кнопку нижче '📞 Надати номер телефону' для авторизації.\n\n"
+            "⚠️ *Увага:* Без авторизації бот не працює і не створює задачі.",
+            reply_markup=contact_request_markup,
+            parse_mode="Markdown"
+        )
+        logger.info(f"global_awaiting_auth_media_handler: відхилено {media_type} від неавторизованого користувача {telegram_id}")
+
 
 async def division_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробка вибраного підрозділу"""
@@ -2501,8 +2544,9 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Додаємо перевірку на обов'язкові поля
         if 'fields' in payload and 'summary' not in payload['fields']:
+            context.user_data.pop("in_conversation", None)  # Очищаємо флаг
             await query.message.reply_text("❌ *Помилка:* _відсутній заголовок задачі_", reply_markup=issues_view_markup, parse_mode="Markdown")
-            return
+            return ConversationHandler.END
         
         # Використовуємо правильно сформований payload
         issue_key = await create_jira_issue(payload)
@@ -2577,10 +2621,14 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             error_message = "Перевищено час очікування відповіді від Jira. Спробуйте ще раз пізніше."
         
         logger.error(f"Помилка при створенні задачі: {str(e)}")
+        context.user_data.pop("in_conversation", None)  # Очищаємо флаг
         await query.message.reply_text(f"❌ *Помилка створення задачі:* _{error_message}_", reply_markup=issues_view_markup, parse_mode="Markdown")
+        return ConversationHandler.END
     except Exception as e:
         logger.error(f"Невідома помилка при створенні задачі: {str(e)}")
+        context.user_data.pop("in_conversation", None)  # Очищаємо флаг
         await query.message.reply_text(f"❌ *Помилка створення задачі.* _Будь ласка, спробуйте пізніше або зв'яжіться з адміністратором._", reply_markup=issues_view_markup, parse_mode="Markdown")
+        return ConversationHandler.END
     
     # Автоматичне збереження нового користувача в Google Sheets (якщо це новий користувач)
     profile = context.user_data.get("profile")
@@ -2608,12 +2656,16 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Помилка автоматичного додавання нового користувача в Google Sheets: {e}")
     
+    # Очищаємо флаг активного conversation перед виходом
+    context.user_data.pop("in_conversation", None)
+    
     # Задачу створено успішно, виходимо з ConversationHandler
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Скасувати ConversationHandler"""
+    context.user_data.pop("in_conversation", None)  # Очищаємо флаг активного conversation
     await update.message.reply_text("❌ *Скасовано.*", reply_markup=issues_view_markup, parse_mode="Markdown")
     return ConversationHandler.END
 
@@ -2800,9 +2852,16 @@ def register_handlers(application):
         entry_points=[MessageHandler(filters.TEXT & filters.Regex("^🆕 Створити задачу$"), create_issue_start)],
         states={
             FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, full_name_handler)],
-            MOBILE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^🏠 Вийти на головну$"), mobile_number_handler), 
-                          MessageHandler(filters.CONTACT, contact_handler),
-                          MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation)],
+            MOBILE_NUMBER: [
+                MessageHandler(filters.CONTACT, contact_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, remind_to_use_button),
+                # Відхиляємо всі типи медіа під час авторизації
+                MessageHandler(
+                    filters.PHOTO | filters.VIDEO | filters.Document.ALL | 
+                    filters.AUDIO | filters.VOICE | filters.Sticker.ALL | filters.VIDEO_NOTE,
+                    reject_any_action_during_auth
+                )
+            ],
 
             DIVISION: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^🏠 Вийти на головну$"), division_handler),
                       MessageHandler(filters.Regex("^🏠 Вийти на головну$"), return_to_main_from_conversation)],
@@ -2821,42 +2880,49 @@ def register_handlers(application):
         name="create_issue_conversation"
     )
 
-    # Важно: ConversationHandler должен быть перед общими обработчиками текста
-    application.add_handler(conv_handler)
+    # ВАЖЛИВО: ConversationHandler має НАЙВИЩИЙ пріоритет (group=-1)
+    # Це гарантує, що він обробить повідомлення РАНІШЕ за всі інші handlers
+    application.add_handler(conv_handler, group=-1)
     
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("reset", reset_registration_handler))
-    application.add_handler(CommandHandler("sync_cache", sync_cache_handler))
-    application.add_handler(CommandHandler("cache_status", cache_status_handler))
-    application.add_handler(MessageHandler(filters.Regex("🆕 Створити задачу"), create_task_button_handler))
-    application.add_handler(MessageHandler(filters.Regex("🔄 Повторити /start"), restart_handler))
-    application.add_handler(MessageHandler(filters.Regex("🔄 Повторна авторизація"), re_auth_handler))
-    application.add_handler(MessageHandler(filters.Regex("👤 Мій профіль"), my_profile_handler))
+    # Команди - group 0 (після ConversationHandler, але перед іншими)
+    application.add_handler(CommandHandler("start", start), group=0)
+    application.add_handler(CommandHandler("reset", reset_registration_handler), group=0)
+    application.add_handler(CommandHandler("sync_cache", sync_cache_handler), group=0)
+    application.add_handler(CommandHandler("cache_status", cache_status_handler), group=0)
+    
+    # Кнопки головного меню - group 0
+    application.add_handler(MessageHandler(filters.Regex("🆕 Створити задачу"), create_task_button_handler), group=0)
+    application.add_handler(MessageHandler(filters.Regex("🔄 Повторити /start"), restart_handler), group=0)
+    application.add_handler(MessageHandler(filters.Regex("🔄 Повторна авторизація"), re_auth_handler), group=0)
+    application.add_handler(MessageHandler(filters.Regex("👤 Мій профіль"), my_profile_handler), group=0)
+    application.add_handler(MessageHandler(filters.Regex("🧾 Мої задачі"), my_issues), group=0)
+    application.add_handler(MessageHandler(filters.Regex("ℹ️ Допомога"), help_handler), group=0)
+    application.add_handler(MessageHandler(filters.Regex("🏠 Вийти на головну"), return_to_main), group=0)
+    application.add_handler(MessageHandler(filters.Regex("🔄 Оновити статус задачі"), update_issues_status), group=0)
+    application.add_handler(MessageHandler(filters.Regex("✅ Перевірити статус задачі"), check_status), group=0)
+    application.add_handler(MessageHandler(filters.Regex("💬 коментар до задачі"), comment_handler), group=0)
+    
     # Глобальний contact_handler для початкової авторизації з головного меню
-    application.add_handler(MessageHandler(filters.CONTACT, global_contact_handler))
-    application.add_handler(MessageHandler(filters.Regex("👤 Продовжити без авторизації"), continue_without_auth))
-    application.add_handler(MessageHandler(filters.Regex("🧾 Мої задачі"), my_issues))
+    application.add_handler(MessageHandler(filters.CONTACT, global_contact_handler), group=0)
     
-    # Callback handlers для головного меню (видалено, тепер використовуємо звичайні кнопки)
-    # application.add_handler(CallbackQueryHandler(my_issues, pattern="^MY_ISSUES$"))
-    # application.add_handler(CallbackQueryHandler(create_issue_start, pattern="^CREATE_ISSUE$"))
-    # application.add_handler(CallbackQueryHandler(help_handler, pattern="^HELP$"))
-    # application.add_handler(CallbackQueryHandler(start, pattern="^RESTART$"))
+    # 🔥 КРИТИЧНО: Глобальні handlers для неавторизованих користувачів (group=0)
+    # Ці handlers спрацьовують ДО авторизації і блокують всі дії окрім надання номера
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(🆕|🧾|🏠|ℹ️|💬|🔄|👤|✅)"),
+        global_awaiting_auth_text_handler
+    ), group=0)
     
-    # Обробники для вибору сервісу (видалено, тепер використовуємо звичайні кнопки)
-    # application.add_handler(CallbackQueryHandler(service_selection_callback, pattern="^SERVICE_"))
-    # application.add_handler(CallbackQueryHandler(service_selection_callback, pattern="^BACK_TO_MAIN$"))
+    application.add_handler(MessageHandler(
+        filters.PHOTO | filters.VIDEO | filters.Document.ALL | 
+        filters.AUDIO | filters.VOICE | filters.Sticker.ALL | filters.VIDEO_NOTE,
+        global_awaiting_auth_media_handler
+    ), group=0)
     
-    application.add_handler(CallbackQueryHandler(issue_callback, pattern="^ISSUE_"))
-    application.add_handler(MessageHandler(filters.Regex("🏠 Вийти на головну"), return_to_main))
-    # Обробник для оновлення статусів задач
-    application.add_handler(MessageHandler(filters.Regex("🔄 Оновити статус задачі"), update_issues_status))
-    application.add_handler(MessageHandler(filters.Regex("✅ Перевірити статус задачі"), check_status))
-    # Обробник для кнопки коментування
-    application.add_handler(MessageHandler(filters.Regex("💬 коментар до задачі"), comment_handler))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, file_handler))
-    # Обробник для кнопки допомоги
-    application.add_handler(MessageHandler(filters.Regex("ℹ️ Допомога"), help_handler))
+    # Callback handlers
+    application.add_handler(CallbackQueryHandler(issue_callback, pattern="^ISSUE_"), group=0)
+    
+    # File handler
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, file_handler), group=0)
 
     # Обробник для збору опису після inline кнопок (вищий пріоритет, GROUP 0)
     application.add_handler(MessageHandler(

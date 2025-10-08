@@ -50,6 +50,7 @@ webhook_rotating_handler.setFormatter(webhook_formatter)
 logger = logging.getLogger(__name__)
 logger.addHandler(webhook_rotating_handler)
 logger.setLevel(logging.INFO)
+logger.propagate = False  # ⚠️ ВАЖЛИВО: Вимикаємо propagation до root logger щоб уникнути дублювання
 
 # === Константи ===
 # Типи подій, на які реагуємо
