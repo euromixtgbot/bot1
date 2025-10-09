@@ -1294,6 +1294,14 @@ async def process_attachments_universal(attachments: List[Dict[str, Any]], issue
         
         logger.info(f"🏁 Attachment processing complete: {success_count} successful, {error_count} failed")
         
+        # Очищаємо оброблені файли з ID-кешу, щоб уникнути повторної обробки
+        for attachment in unique_attachments:
+            att_id = attachment.get('id')
+            if att_id and att_id in ATTACHMENT_ID_CACHE:
+                filename = attachment.get('filename', 'unknown')
+                logger.info(f"🗑️ Removing processed attachment from ID cache: {filename} (ID: {att_id})")
+                del ATTACHMENT_ID_CACHE[att_id]
+        
     except Exception as e:
         logger.error(f"❌ Error in process_attachments_universal: {str(e)}", exc_info=True)
 
@@ -1677,7 +1685,7 @@ def find_cached_attachments_by_patterns(issue_key: str, embedded_attachments: Li
         time_window = 600  # 10 хвилин для розширеного пошуку втрачених файлів
         logger.info(f"🔄 EXTENDED STRATEGY 3: Searching by timestamp within {time_window}s of comment (RECOVERY MODE)")
     else:
-        time_window = 180  # секунд - збільшено з 30 до 180 для обробки пакетних завантажень
+        time_window = 30  # секунд - зменшено зі 180 до 30, щоб уникнути захоплення старих файлів
         logger.info(f"🔍 STRATEGY 3: Searching by timestamp within {time_window}s of comment")
     
     for att_id, cached_data in ATTACHMENT_ID_CACHE.items():
