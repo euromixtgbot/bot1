@@ -252,18 +252,27 @@ async def main():
         else:
             logger.warning("WEBHOOK_URL не настроен, вебхуки от Jira работать не будут!")
             
-        # Запускаем polling для обработки команд пользователей в Telegram
-        logger.info("Запуск Telegram polling для команд пользователей...")
+        # ❌ ВИДАЛЕНО polling - використовуємо ТІЛЬКИ webhook для Telegram
+        # Webhook обробляє ВСІ повідомлення: від користувачів AND від Jira
+        # Polling + webhook конфліктують в Telegram Bot API
         
-        # Запускаем updater вручную
-        await application.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"]
-        )
+        # Встановлюємо webhook для Telegram Bot API
+        if WEBHOOK_URL and WEBHOOK_HOST and WEBHOOK_PORT:
+            try:
+                # Встановлюємо webhook для отримання повідомлень від Telegram
+                webhook_url = WEBHOOK_URL.replace("/rest/webhooks/webhook1", "/telegram")
+                await application.bot.set_webhook(
+                    url=webhook_url,
+                    drop_pending_updates=True,
+                    allowed_updates=["message", "callback_query", "document", "photo", "video", "audio"]
+                )
+                logger.info(f"Telegram webhook встановлено: {webhook_url}")
+            except Exception as e:
+                logger.error(f"Помилка встановлення Telegram webhook: {e}")
         
         # Ожидаем бесконечно (до Ctrl+C)
         logger.info("✅ Бот полностью запущен:")
-        logger.info("  - Telegram polling: активен (обрабатывает команды пользователей)")
+        logger.info("  - Telegram webhook: активен (получает сообщения от пользователей)")
         if WEBHOOK_URL and WEBHOOK_HOST and WEBHOOK_PORT:
             logger.info(f"  - Jira webhook сервер: активен на {WEBHOOK_HOST}:{WEBHOOK_PORT}")
         logger.info("Для остановки нажмите Ctrl+C")

@@ -121,12 +121,21 @@ class UserStateManager:
 def save_user_profile(telegram_id: int, user_data: Dict[str, Any], status: str = "active") -> bool:
     """Зберігає повний профіль користувача як резервну копію та кеш"""
     try:
+        # Завантажуємо існуючий стан, щоб зберегти bot_state
+        current_state = user_state_manager.load_user_state(telegram_id)
+        
         profile_data = {
             "profile": user_data,
             "status": status,  # active, registration_in_progress, inactive
             "sync_with_google": True,
             "type": "user_profile"
         }
+        
+        # Зберігаємо існуючий bot_state, якщо він є
+        if current_state and "bot_state" in current_state:
+            profile_data["bot_state"] = current_state["bot_state"]
+            logger.info(f"Збережено існуючий bot_state для користувача {telegram_id}: {current_state['bot_state']}")
+        
         return user_state_manager.save_user_state(telegram_id, profile_data)
     except Exception as e:
         logger.error(f"Помилка збереження профілю користувача {telegram_id}: {e}")

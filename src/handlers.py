@@ -247,8 +247,19 @@ async def main_message_dispatcher(update: Update, context: ContextTypes.DEFAULT_
             logger.info(f"📱 Користувач {telegram_id} натиснув кнопку: {update.message.text} - пропускаємо далі")
             return  # Пропускаємо кнопки до інших обробників
         
+        # ✅ ДОДАНО: Логування для діагностики медіа
+        if update.message.photo:
+            logger.info(f"📸 Отримано фото від користувача {telegram_id}")
+        elif update.message.document:
+            logger.info(f"📄 Отримано документ від користувача {telegram_id}")  
+        elif update.message.video:
+            logger.info(f"🎥 Отримано відео від користувача {telegram_id}")
+        elif update.message.audio:
+            logger.info(f"🎵 Отримано аудіо від користувача {telegram_id}")
+        
         # Всі повідомлення (текст, файли) - це коментарі до поточної задачі
-        if update.message.text or update.message.photo or update.message.document:
+        if (update.message.text or update.message.photo or update.message.document or 
+            update.message.video or update.message.audio):  # ✅ Додано video та audio
             await handle_task_comment(update, context, current_task)
             raise ApplicationHandlerStop  # Зупиняємо подальшу обробку
     
@@ -442,18 +453,34 @@ async def handle_task_comment(update: Update, context: ContextTypes.DEFAULT_TYPE
         if update.message.photo:
             # Фото з текстом або без
             caption = update.message.caption or ""
+            logger.info(f"📸 Обробка фото з підписом: '{caption}'")
             await handle_file_for_task(update, context, task_key, author_name)
             
         elif update.message.document:
             # Документ з текстом або без
             caption = update.message.caption or ""
+            logger.info(f"📄 Обробка документу з підписом: '{caption}'")
+            await handle_file_for_task(update, context, task_key, author_name)
+            
+        elif update.message.video:
+            # Відео з текстом або без
+            caption = update.message.caption or ""
+            logger.info(f"🎥 Обробка відео з підписом: '{caption}'")
+            await handle_file_for_task(update, context, task_key, author_name)
+            
+        elif update.message.audio:
+            # Аудіо з текстом або без
+            caption = update.message.caption or ""
+            logger.info(f"🎵 Обробка аудіо з підписом: '{caption}'")
             await handle_file_for_task(update, context, task_key, author_name)
             
         elif update.message.text:
             # Текстовий коментар
+            logger.info(f"💬 Обробка текстового коментаря: '{update.message.text[:50]}...'")
             await text_comment_handler(update, context, task_key, author_name)
             
         else:
+            logger.warning(f"❌ Непідтримуваний тип повідомлення від користувача {telegram_id}")
             await update.message.reply_text("❌ Непідтримуваний тип повідомлення")
             
     except Exception as e:
@@ -484,8 +511,8 @@ async def text_comment_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         # Додаємо коментар до Jira
         await add_comment_to_jira(task_key, text, author_name)
-        # ВИДАЛЕНО: Дублювання з повідомленням webhook
-        # await update.message.reply_text(f"✅ Коментар додано до задачі {task_key}")
+        # Підтвердження користувачу (webhook не спрацює для коментарів від бота)
+        await update.message.reply_text(f"✅ Коментар додано до задачі {task_key}")
         
     except Exception as e:
         logger.error(f"Помилка додавання текстового коментаря до {task_key}: {e}")
@@ -1377,6 +1404,7 @@ async def return_to_main_from_conversation(update: Update, context: ContextTypes
     context.user_data.pop("service", None)
     context.user_data.pop("description", None)
     context.user_data.pop("attached_photo", None)
+    context.user_data.pop("in_conversation", None)  # КРИТИЧНО: очищаємо флаг conversation
     
     await update.message.reply_text("🏠 *Головне меню*", reply_markup=main_menu_markup, parse_mode="Markdown")
     return ConversationHandler.END
@@ -1389,6 +1417,19 @@ async def return_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del context.user_data["last_issues_list"]
     
     await update.message.reply_text("🏠", reply_markup=main_menu_markup, parse_mode="Markdown")
+
+
+async def handle_back_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Глобальний обробник для кнопки '🔙 Назад'"""
+    # Очищаємо флаг conversation якщо він є
+    context.user_data.pop("in_conversation", None)
+    
+    # Повертаємо на головне меню
+    await update.message.reply_text(
+        "🏠 *Головне меню*", 
+        reply_markup=main_menu_markup, 
+        parse_mode="Markdown"
+    )
 
 
 async def issue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1423,9 +1464,8 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return  # Просто виходимо, не обробляємо
     
     # ПЕРЕВІРКА 2: якщо користувач у процесі створення задачі (ConversationHandler активний), НЕ обробляємо
-    # Перевіряємо наявність даних, які встановлюються тільки в ConversationHandler
-    if context.user_data and any(key in context.user_data for key in ["full_name", "division", "department", "service", "description"]):
-        # Якщо є хоча б одне з цих полів - користувач у процесі створення задачі
+    # Перевіряємо спеціальний флаг, а не наявність даних профілю
+    if context.user_data.get("in_conversation"):
         logger.info(f"comment_handler: користувач у процесі створення задачі (ConversationHandler активний), ігноруємо")
         return  # Просто виходимо, не обробляємо
     
@@ -1434,7 +1474,7 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"comment_handler: перевіряємо текст: '{text}'")
     
     if text in ["🧾 Мої задачі", "🆕 Створити задачу", "ℹ️ Допомога", "🔄 Повторити /start", 
-                "🔄 Оновити статус задачі", "✅ Перевірити статус задачі"]:
+                "🔄 Оновити статус задачі", "✅ Перевірити статус задачі", "🔙 Назад", "🏠 Вийти на головну"]:
         # Це кнопка, пропускаємо
         logger.info(f"comment_handler: це кнопка, пропускаємо обробку")
         return  # Просто виходимо
@@ -1530,12 +1570,12 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         formatted_message = text
         add_message_to_cache(key, formatted_message)
         
-        # ВИДАЛЕНО: Дублювання з повідомленням webhook про коментар
-        # await update.message.reply_text(
-        #     f"✅ Коментар додано до задачі *{key}*.\n_Ви можете продовжити додавати коментарі або прикріпити файл._", 
-        #     reply_markup=issues_view_markup,
-        #     parse_mode="Markdown"
-        # )
+        # Підтвердження користувачу (webhook може не спрацювати для коментарів від бота)
+        await update.message.reply_text(
+            f"✅ Коментар додано до задачі *{key}*",
+            reply_markup=main_menu_markup,
+            parse_mode="Markdown"
+        )
     except Exception as e:
         logger.error(f"Помилка додавання коментаря до {key}: {str(e)}")
         await update.message.reply_text(
@@ -1547,7 +1587,14 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробляє будь-яке вкладення і прикріплює до активної задачі"""
-    key = context.user_data.get("active_task")
+    # Отримуємо поточну задачу з bot_state
+    telegram_id = update.message.from_user.id
+    key = get_user_current_task(telegram_id)
+    
+    # Якщо не знайдено в bot_state, перевіряємо старий спосіб (для сумісності)
+    if not key:
+        key = context.user_data.get("active_task")
+    
     if not key:
         await update.message.reply_text("❗ *Спершу створіть або виберіть задачу.*", reply_markup=issues_view_markup, parse_mode="Markdown")
         return
@@ -1764,6 +1811,12 @@ async def create_issue_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # Перевіряємо чи це автоматичне створення задачі з довільного тексту
     auto_create = context.user_data.get("skip_description", False)
+    
+    # ✅ Якщо це кнопкове створення, очищаємо залишки від попереднього автоматичного створення
+    if message_text in ["🆕 Створити задачу", "CREATE_ISSUE"] and not auto_create:
+        context.user_data.pop("issue_description", None)
+        context.user_data.pop("skip_description", None)
+        logger.info("Кнопкове створення: очищено issue_description та skip_description")
     
     # Додаткова перевірка на точний текст кнопки (тільки якщо не автоматичне створення)
     if not auto_create and message_text and message_text not in ["🆕 Створити задачу", "CREATE_ISSUE"]:
@@ -2221,6 +2274,7 @@ async def create_issue_automatically(update: Update, context: ContextTypes.DEFAU
         logger.info(f"🔄 Стан користувача {telegram_id} змінено на AUTHORIZED_WITH_TASK з задачею {issue_key}")
         
         # Очищаємо тимчасові дані
+        context.user_data.pop("in_conversation", None)  # ✅ Очищаємо флаг ПЕРЕД clear()
         context.user_data.clear()
         context.user_data["active_task"] = issue_key
         context.user_data["telegram_id"] = str(telegram_id)
@@ -2230,7 +2284,7 @@ async def create_issue_automatically(update: Update, context: ContextTypes.DEFAU
             f"🎫 *Номер задачі:* `{issue_key}`\n"
             f"📝 *Опис:* {bot_vars.get('description', '')[:100]}{'...' if len(bot_vars.get('description', '')) > 100 else ''}\n\n"
             f"💬 *Тепер ви можете додавати коментарі до цієї задачі, просто написавши повідомлення.*",
-            reply_markup=issues_view_markup,
+            reply_markup=main_menu_markup,
             parse_mode="Markdown"
         )
         
@@ -2420,7 +2474,7 @@ async def description_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # Очищаємо дані conversation після успішного створення
         conversation_keys = ["full_name", "mobile_number", "division", "department", 
-                           "service", "description", "attached_photo"]
+                           "service", "description", "attached_photo", "in_conversation"]
         for key in conversation_keys:
             context.user_data.pop(key, None)
             
@@ -2603,6 +2657,10 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             #                             reply_markup=issues_view_markup,
             #                             parse_mode="Markdown")
             pass  # Webhook вже надішле повідомлення про створення задачі
+        
+        # Очищаємо флаг conversation після успішного створення
+        context.user_data.pop("in_conversation", None)
+        
     except JiraApiError as e:
         error_message = str(e)
         # Извлекаем информативную часть сообщения об ошибке
@@ -2884,6 +2942,9 @@ def register_handlers(application):
     # Це гарантує, що він обробить повідомлення РАНІШЕ за всі інші handlers
     application.add_handler(conv_handler, group=-1)
     
+    # Глобальний обробник для кнопки "🔙 Назад" (group=0 - перед іншими)
+    application.add_handler(MessageHandler(filters.Regex("^🔙 Назад$"), handle_back_button), group=0)
+    
     # Команди - group 0 (після ConversationHandler, але перед іншими)
     application.add_handler(CommandHandler("start", start), group=0)
     application.add_handler(CommandHandler("reset", reset_registration_handler), group=0)
@@ -2905,6 +2966,9 @@ def register_handlers(application):
     # Глобальний contact_handler для початкової авторизації з головного меню
     application.add_handler(MessageHandler(filters.CONTACT, global_contact_handler), group=0)
     
+    # File handler (ПЕРЕД global_awaiting_auth_media_handler для обробки медіа від авторизованих користувачів)
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, file_handler), group=0)
+    
     # 🔥 КРИТИЧНО: Глобальні handlers для неавторизованих користувачів (group=0)
     # Ці handlers спрацьовують ДО авторизації і блокують всі дії окрім надання номера
     application.add_handler(MessageHandler(
@@ -2920,9 +2984,6 @@ def register_handlers(application):
     
     # Callback handlers
     application.add_handler(CallbackQueryHandler(issue_callback, pattern="^ISSUE_"), group=0)
-    
-    # File handler
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO, file_handler), group=0)
 
     # Обробник для збору опису після inline кнопок (вищий пріоритет, GROUP 0)
     application.add_handler(MessageHandler(

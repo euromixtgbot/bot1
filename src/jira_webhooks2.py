@@ -185,6 +185,10 @@ async def security_middleware(request: web.Request, handler) -> web.Response:
     Returns:
         web.Response: Відповідь
     """
+    # Виключаємо /telegram endpoint з security перевірок (Telegram має динамічні IP)
+    if request.path == '/telegram':
+        return await handler(request)
+    
     # Отримуємо IP-адресу клієнта
     # Враховуємо proxy (X-Forwarded-For, X-Real-IP)
     client_ip = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
@@ -693,7 +697,6 @@ async def handle_comment_created(webhook_data: Dict[str, Any]) -> None:
         # Process and send attachments
         if attachments:
             logger.info("Starting to process attachments")
-            #await process_attachments(attachments, issue_key, user_data['telegram_id'])
             await process_attachments_universal(attachments, issue_key, user_data['telegram_id'])
         
         # Очищаємо кеш вкладень після обробки коментаря  
@@ -1207,6 +1210,10 @@ async def process_attachments_universal(attachments: List[Dict[str, Any]], issue
     Універсальна обробка вкладень з кешованими та webhook даними.
     Об'єднує кешовані вкладення з отриманими через webhook, видаляє дублікати 
     та відправляє кожен файл як окреме повідомлення.
+    
+    ⚠️ NOTE: Це АКТИВНА функція для обробки вкладень Jira → Telegram.
+    📌 HISTORY: Замінила стару функцію process_attachments() яка була видалена 2025-10-08.
+                Використовуйте ТІЛЬКИ process_attachments_universal() для обробки файлів.
     
     Args:
         attachments: Список вкладень з webhook
@@ -1746,6 +1753,60 @@ def files_match(filename1: str, filename2: str) -> bool:
     
     return False
 
+# Обробник Telegram webhooks
+async def handle_telegram_webhook(request: web.Request) -> web.Response:
+    """
+    Обробляє вхідні Telegram webhooks.
+    
+    Args:
+        request: aiohttp запит від Telegram
+        
+    Returns:
+        JSON response для Telegram API
+    """
+    try:
+        # Отримуємо JSON з тіла запиту
+        update_data = await request.json()
+        logger.info(f"📩 Отримано Telegram update: {update_data.get('update_id', 'unknown')}")
+        
+        # Отримуємо application з app state
+        app = request.app.get('telegram_app')
+        if not app:
+            logger.error("❌ Telegram application не знайдено в app state")
+            return web.json_response({"status": "error", "message": "Application not initialized"}, status=500)
+        
+        # Конвертуємо JSON в Telegram Update об'єкт
+        from telegram import Update
+        update = Update.de_json(update_data, app.bot)
+        
+        if update:
+            # Додаємо update в чергу обробки
+            await app.update_queue.put(update)
+            logger.info(f"✅ Telegram update {update.update_id} додано в чергу обробки")
+            
+            # Логуємо тип повідомлення для діагностики
+            if update.message:
+                msg = update.message
+                if msg.text:
+                    logger.info(f"  └─ Тип: TEXT")
+                elif msg.photo:
+                    logger.info(f"  └─ Тип: PHOTO (кількість: {len(msg.photo)})")
+                elif msg.document:
+                    logger.info(f"  └─ Тип: DOCUMENT ({msg.document.file_name})")
+                elif msg.video:
+                    logger.info(f"  └─ Тип: VIDEO ({msg.video.duration}s)")
+                elif msg.audio:
+                    logger.info(f"  └─ Тип: AUDIO ({msg.audio.duration}s)")
+            
+            return web.json_response({"status": "ok"})
+        else:
+            logger.warning(f"⚠️ Не вдалося створити Update об'єкт з отриманих даних")
+            return web.json_response({"status": "error", "message": "Invalid update data"}, status=400)
+            
+    except Exception as e:
+        logger.error(f"❌ Помилка обробки Telegram webhook: {e}", exc_info=True)
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
 # Функція для інтеграції з основним застосунком
 async def setup_webhook_server(app, host: str, port: int, ssl_context: Optional[Any] = None):
     """
@@ -1763,8 +1824,12 @@ async def setup_webhook_server(app, host: str, port: int, ssl_context: Optional[
         middlewares=[security_middleware]  # Додаємо security middleware
     )
     
+    # Зберігаємо Telegram application в app state для використання в webhook handler
+    web_app['telegram_app'] = app
+    
     # Налаштовуємо маршрути
-    web_app.router.add_post('/rest/webhooks/webhook1', handle_webhook)
+    web_app.router.add_post('/rest/webhooks/webhook1', handle_webhook)  # Jira webhooks
+    web_app.router.add_post('/telegram', handle_telegram_webhook)        # ✅ Telegram webhooks
     
     # Налаштуємо додатковий маршрут для простої перевірки роботи вебхуку
     async def ping(request):
@@ -1885,40 +1950,6 @@ async def send_attachment_to_telegram(attachment_data: dict) -> bool:
     except Exception as e:
         logger.error(f"Error in send_attachment_to_telegram: {str(e)}", exc_info=True)
         return False
-
-async def process_attachments(attachments: List[Dict[str, Any]], issue_key: str, chat_id: str) -> None:
-    """
-    Process and send attachment files from Jira to Telegram.
-    This function delegates to the new attachment_processor utilities.
-    
-    Args:
-        attachments: List of attachment objects from Jira
-        issue_key: The issue key (e.g., 'SD-40461')
-        chat_id: Telegram chat ID to send files to
-    """
-    try:
-        if not attachments:
-            logger.info("No attachments to process")
-            return
-            
-        logger.info(f"Processing {len(attachments)} attachments for issue {issue_key}")
-        
-        # Add chat_id to each attachment for use by the processor
-        for att in attachments:
-            att['chat_id'] = chat_id
-            
-        # Use our new utilities to process attachments
-        success, errors = await process_attachments_for_issue(
-            JIRA_DOMAIN,
-            attachments,
-            issue_key,
-            send_attachment_to_telegram
-        )
-        
-        logger.info(f"Completed processing attachments: {success} successful, {errors} failed")
-        
-    except Exception as e:
-        logger.error(f"Error in process_attachments: {str(e)}", exc_info=True)
 
 def extract_embedded_attachments(text: str) -> List[dict]:
     """
