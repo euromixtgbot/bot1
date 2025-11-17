@@ -1,50 +1,43 @@
 # keyboards.py
 
-from telegram import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from src.constants import DIVISIONS, DEPARTMENTS, SERVICES
+from telegram import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 
 # Кнопки головного меню (використовуємо звичайні кнопки)
 MAIN_MENU_BUTTONS = [
     ["🧾 Мої задачі", "🆕 Створити задачу"],
-    ["ℹ️ Допомога", "🔄 Повторити /start"]
+    ["ℹ️ Допомога", "🔄 Повторити /start"],
 ]
 main_menu_markup = ReplyKeyboardMarkup(
-    MAIN_MENU_BUTTONS,
-    resize_keyboard=True,
-    one_time_keyboard=False
+    MAIN_MENU_BUTTONS, resize_keyboard=True, one_time_keyboard=False
 )
 
 # Кнопка для запиту контактів (обов'язкова авторизація)
 contact_request_markup = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("📞 Надати номер телефону", request_contact=True)]
-    ],
+    [[KeyboardButton("📞 Надати номер телефону", request_contact=True)]],
     resize_keyboard=True,
     one_time_keyboard=False,
-    input_field_placeholder="👇 Натисніть кнопку нижче"
+    input_field_placeholder="👇 Натисніть кнопку нижче",
 )
 
 # Кнопки після створення задачі
 AFTER_CREATE_BUTTONS = [
     ["✅ Перевірити статус задачі"],
-
 ]
 after_create_markup = ReplyKeyboardMarkup(
-    AFTER_CREATE_BUTTONS,
-    resize_keyboard=True,
-    one_time_keyboard=False
+    AFTER_CREATE_BUTTONS, resize_keyboard=True, one_time_keyboard=False
 )
 
 # Кнопки для режиму перегляду задач
-ISSUES_VIEW_BUTTONS = [
-    ["🔄 Оновити статус задачі"],
-    ["🏠 Вийти на головну"]
-]
+ISSUES_VIEW_BUTTONS = [["🔄 Оновити статус задачі"], ["🏠 Вийти на головну"]]
 issues_view_markup = ReplyKeyboardMarkup(
-    ISSUES_VIEW_BUTTONS,
-    resize_keyboard=True,
-    one_time_keyboard=False
+    ISSUES_VIEW_BUTTONS, resize_keyboard=True, one_time_keyboard=False
 )
+
 
 # Кнопки для кроку «Сервіс» - використовуємо звичайні кнопки
 def service_selection_markup(services: list) -> ReplyKeyboardMarkup:
@@ -57,13 +50,17 @@ def service_selection_markup(services: list) -> ReplyKeyboardMarkup:
     buttons.append(["🔙 Назад"])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True, one_time_keyboard=True)
 
+
 # Inline-кнопки у діалозі підтвердження
-confirm_issue_markup = InlineKeyboardMarkup([
+confirm_issue_markup = InlineKeyboardMarkup(
     [
-        InlineKeyboardButton("Створити задачу", callback_data="CONFIRM_CREATE"),
-        InlineKeyboardButton("🔙 Назад", callback_data="BACK_TO_SERVICE")
+        [
+            InlineKeyboardButton("Створити задачу", callback_data="CONFIRM_CREATE"),
+            InlineKeyboardButton("🔙 Назад", callback_data="BACK_TO_SERVICE"),
+        ]
     ]
-])
+)
+
 
 # Функція для генерації списку моїх задач - більше не використовується для інлайн-кнопок
 def my_issues_markup(issues: list) -> InlineKeyboardMarkup:
@@ -72,7 +69,12 @@ def my_issues_markup(issues: list) -> InlineKeyboardMarkup:
     інлайн-кнопок. Список задач тепер відображається як текст.
     """
     buttons = [
-        [InlineKeyboardButton(f"{item['key']} — {item['status']}", callback_data=f"ISSUE_{item['key']}")]
+        [
+            InlineKeyboardButton(
+                f"{item['key']} — {item['status']}",
+                callback_data=f"ISSUE_{item['key']}",
+            )
+        ]
         for item in issues
     ]
     return InlineKeyboardMarkup(buttons)

@@ -1,0 +1,14 @@
+# Ignore markdown files in reports
+reports/*.md
+backups/*.md
+docs/*.md
+
+# Ignore deployment docs
+deployment/*.md
+monitoring/*.md
+
+# Ignore all markdown reports
+**/*_REPORT.md
+**/*_SUMMARY.md
+**/**FIXES**.md
+**/*_STATUS*.md
