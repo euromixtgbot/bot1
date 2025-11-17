@@ -150,11 +150,11 @@ class UserManager:
                 update_user_sync_status(telegram_id, True)
 
                 logger.info(
-                    f"Користувач авторизований: {record.get('full_name')} (телефон: {phone})"
+                    f"Користувач авторизований: {record.get('full_name')}"
                 )
                 return record, "authorized"
             else:
-                logger.info(f"Користувач з номером {phone} не знайдений в базі")
+                logger.info("Користувач не знайдений в базі (пошук за номером телефону)")
                 return None, "need_registration"
 
         except GoogleSheetsError as e:
@@ -166,7 +166,7 @@ class UserManager:
             for cached_user in all_cached:
                 if cached_user.get("mobile_number") == phone:
                     logger.info(
-                        f"Користувач знайдений в локальному кеші за номером {phone}"
+                        "Користувач знайдений в локальному кеші (пошук за номером телефону)"
                     )
                     return cached_user, "authorized"
 
