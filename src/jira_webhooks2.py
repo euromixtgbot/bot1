@@ -1650,21 +1650,28 @@ def format_comment_text(text: str) -> str:
     # Формат: !filename.ext|параметри!
     import re
 
+    # Обмежуємо довжину тексту для безпеки (захист від ReDoS атак)
+    MAX_TEXT_LENGTH = 50000
+    if len(text) > MAX_TEXT_LENGTH:
+        text = text[:MAX_TEXT_LENGTH]
+
     # Видаляємо розмітку зображень !image.jpg|width=719,height=1280,alt="image.jpg"!
-    text = re.sub(r"!([^|]+\.[a-zA-Z0-9]+)(\|[^!]+)?!", "", text)
+    # Використовуємо non-greedy quantifier та обмежуємо кількість символів
+    text = re.sub(r"!([^|!]{1,255}\.[a-zA-Z0-9]+)(\|[^!]{1,500})?!", "", text)
 
     # Видаляємо посилання на файли у форматі [^filename.ext]
-    text = re.sub(r"\[\^[^\]]+\]", "", text)
+    # Використовуємо atomic group для запобігання backtracking
+    text = re.sub(r"\[\^[^\]]{1,255}\]", "", text)
 
     # Видаляємо зайві пробіли та порожні рядки
     text = re.sub(r"\n\s*\n", "\n", text)  # Замінюємо кілька порожніх рядків на один
     text = text.strip()
 
-    # Конвертуємо Jira bold в HTML
-    text = re.sub(r"\*([^*]+)\*", r"<b>\1</b>", text)
+    # Конвертуємо Jira bold в HTML (обмежуємо довжину для безпеки від ReDoS)
+    text = re.sub(r"\*([^*]{1,500})\*", r"<b>\1</b>", text)
 
-    # Конвертуємо Jira italic в HTML
-    text = re.sub(r"_([^_]+)_", r"<i>\1</i>", text)
+    # Конвертуємо Jira italic в HTML (обмежуємо довжину для безпеки від ReDoS)
+    text = re.sub(r"_([^_]{1,500})_", r"<i>\1</i>", text)
 
     return text
 
