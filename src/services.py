@@ -426,7 +426,7 @@ async def create_jira_issue(fields: Dict) -> str:
 
             if not response or not response.get("key"):
                 logger.error(
-                    f"Invalid response format, no key found: {json.dumps(response, indent=2, ensure_ascii=False)[:200]}..."
+                    f"Invalid response format, no key found: {json.dumps(response, indent=2, ensure_ascii=False)[:200]}..."  # noqa: E501
                 )
                 raise JiraApiError("Failed to get issue key from response")
 
@@ -938,7 +938,7 @@ def _ensure_correct_custom_fields_format(payload: Dict[str, Any]) -> None:
                         ]
                         if valid_ids and id_value not in valid_ids:
                             logger.warning(
-                                f"⚠️ Возможно неверное значение ID для поля {field_name}: {id_value} не найдено в списке допустимых значений!"
+                                f"⚠️ Возможно неверное значение ID для поля {field_name}: {id_value} не найдено в списке допустимых значений!"  # noqa: E501
                             )
 
                 elif "name" in field_value and field_value["name"] != field_id:

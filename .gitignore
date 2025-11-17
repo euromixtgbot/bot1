@@ -50,6 +50,9 @@ bot*.log
 *.temp
 .cache/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.plan/
 
 # IDE
 .vscode/settings.json

@@ -19,7 +19,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
-from config.config import (
+from config.config import (  # noqa: E402
     JIRA_DOMAIN,
     JIRA_API_TOKEN,
     JIRA_EMAIL,
@@ -31,15 +31,15 @@ from config.config import (
     WEBHOOK_IP_WHITELIST_ENABLED,
     WEBHOOK_IP_WHITELIST_CUSTOM,
 )
-from src.services import find_user_by_jira_issue_key
-from src.fixed_issue_formatter import format_issue_info, format_issue_text
-from src.jira_attachment_utils import (
+from src.services import find_user_by_jira_issue_key  # noqa: E402
+from src.fixed_issue_formatter import format_issue_info, format_issue_text  # noqa: E402
+from src.jira_attachment_utils import (  # noqa: E402
     build_attachment_urls,
     download_file_from_jira,
 )
 
 # Ініціалізуємо логування з ротацією для вебхуків
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler  # noqa: E402
 
 # Налаштовуємо ротуючий файловий хендлер для вебхуків (5MB максимум, 5 файлів)
 webhook_rotating_handler = RotatingFileHandler(
@@ -87,7 +87,7 @@ IP_WHITELIST = {
     "127.0.0.1",
     "::1",
     # Jira Cloud IP ranges (Atlassian)
-    # https://support.atlassian.com/organization-administration/docs/ip-addresses-and-domains-for-atlassian-cloud-products/
+    # https://support.atlassian.com/organization-administration/docs/ip-addresses-and-domains-for-atlassian-cloud-products/  # noqa: E501
     "13.52.5.0/24",
     "13.236.8.0/21",
     "18.136.0.0/16",
@@ -112,8 +112,10 @@ if WEBHOOK_IP_WHITELIST_CUSTOM:
             IP_WHITELIST.add(ip)
             logger.info(f"✅ Added custom IP to whitelist from config: {ip}")
 
+
 # Глобальні структури для rate limiting
-from collections import deque
+from collections import deque  # noqa: E402
+
 
 RATE_LIMIT_TRACKER: Dict[str, deque] = defaultdict(
     lambda: deque(maxlen=RATE_LIMIT_MAX_REQUESTS)
@@ -185,7 +187,7 @@ def check_rate_limit(ip: str) -> Tuple[bool, str]:
         # Перевищено ліміт - додаємо в чорний список
         RATE_LIMIT_BLACKLIST[ip] = current_time + RATE_LIMIT_BLACKLIST_DURATION
         logger.warning(
-            f"🚫 Rate limit exceeded for IP {ip}: {len(request_times)} requests in {RATE_LIMIT_WINDOW}s. Blacklisted for {RATE_LIMIT_BLACKLIST_DURATION}s"
+            f"🚫 Rate limit exceeded for IP {ip}: {len(request_times)} requests in {RATE_LIMIT_WINDOW}s. Blacklisted for {RATE_LIMIT_BLACKLIST_DURATION}s"  # noqa: E501
         )
         return (
             False,
@@ -503,9 +505,7 @@ async def handle_issue_updated(webhook_data: Dict[str, Any]) -> None:
 
         # Отримуємо дані про задачу
         issue_key = webhook_data.get("issue", {}).get("key", "")
-        issue_summary = (
-            webhook_data.get("issue", {}).get("fields", {}).get("summary", "")
-        )
+        _ = webhook_data.get("issue", {}).get("fields", {}).get("summary", "")
 
         logger.info(
             f"Статус задачі {issue_key} змінився з '{old_status}' на '{new_status}'"
@@ -978,13 +978,13 @@ async def handle_attachment_created(webhook_data: Dict[str, Any]) -> None:
         # ОСНОВНА ЗМІНА: Кешуємо вкладення замість негайної відправки
         logger.info(f"🔵 ATTEMPTING TO CACHE: {filename} for issue {issue_key}")
         logger.info(
-            f"🔵 CACHE STATE BEFORE: {len(PENDING_ATTACHMENTS_CACHE)} issues, {sum(len(v) for v in PENDING_ATTACHMENTS_CACHE.values())} total attachments"
+            f"🔵 CACHE STATE BEFORE: {len(PENDING_ATTACHMENTS_CACHE)} issues, {sum(len(v) for v in PENDING_ATTACHMENTS_CACHE.values())} total attachments"  # noqa: E501
         )
 
         add_attachment_to_cache(issue_key, attachment)
 
         logger.info(
-            f"🔵 CACHE STATE AFTER: {len(PENDING_ATTACHMENTS_CACHE)} issues, {sum(len(v) for v in PENDING_ATTACHMENTS_CACHE.values())} total attachments"
+            f"🔵 CACHE STATE AFTER: {len(PENDING_ATTACHMENTS_CACHE)} issues, {sum(len(v) for v in PENDING_ATTACHMENTS_CACHE.values())} total attachments"  # noqa: E501
         )
         logger.info(f"✅ Attachment {filename} cached for issue {issue_key}")
         logger.info("💡 Waiting for comment_created event to process attachment...")
@@ -1268,7 +1268,7 @@ async def send_telegram_message(
                     try:
                         if hasattr(e, "response") and e.response:
                             error_details = f"{e} - Response: {e.response.text}"
-                    except:
+                    except Exception:
                         pass
 
                     logger.error(f"Error details: {error_details}")
@@ -1609,21 +1609,21 @@ async def send_telegram_text(chat_id: str, text: str) -> bool:
     """
     try:
         from config.config import TELEGRAM_BOT_TOKEN
-        import requests
 
         tg_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
 
-        response = requests.post(tg_url, json=data)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(tg_url, json=data)
 
-        if response.status_code == 200:
-            logger.info("Повідомлення успішно надіслано")
-            return True
-        else:
-            logger.error(
-                f"Помилка надсилання повідомлення: {response.status_code} - {response.text}"
-            )
-            return False
+            if response.status_code == 200:
+                logger.info("Повідомлення успішно надіслано")
+                return True
+            else:
+                logger.error(
+                    f"Помилка надсилання повідомлення: {response.status_code} - {response.text}"
+                )
+                return False
 
     except Exception as e:
         logger.error(
@@ -1749,7 +1749,7 @@ def add_attachment_to_cache(issue_key: str, attachment: Dict[str, Any]) -> None:
 
     logger.info(f"📦 CACHING: {filename} for issue {issue_key} (ID: {attachment_id})")
     logger.info(
-        f"📦 CACHE STATE BEFORE: {len(PENDING_ATTACHMENTS_CACHE)} issues, {sum(len(v) for v in PENDING_ATTACHMENTS_CACHE.values())} total attachments"
+        f"📦 CACHE STATE BEFORE: {len(PENDING_ATTACHMENTS_CACHE)} issues, {sum(len(v) for v in PENDING_ATTACHMENTS_CACHE.values())} total attachments"  # noqa: E501
     )
 
     cache_entry = {
@@ -1762,10 +1762,10 @@ def add_attachment_to_cache(issue_key: str, attachment: Dict[str, Any]) -> None:
     PENDING_ATTACHMENTS_CACHE[issue_key].append(cache_entry)
 
     logger.info(
-        f"✅ CACHED SUCCESSFULLY: Issue {issue_key} now has {len(PENDING_ATTACHMENTS_CACHE[issue_key])} cached attachments"
+        f"✅ CACHED SUCCESSFULLY: Issue {issue_key} now has {len(PENDING_ATTACHMENTS_CACHE[issue_key])} cached attachments"  # noqa: E501
     )
     logger.info(
-        f"📦 CACHE STATE AFTER: {len(PENDING_ATTACHMENTS_CACHE)} issues, {sum(len(v) for v in PENDING_ATTACHMENTS_CACHE.values())} total attachments"
+        f"📦 CACHE STATE AFTER: {len(PENDING_ATTACHMENTS_CACHE)} issues, {sum(len(v) for v in PENDING_ATTACHMENTS_CACHE.values())} total attachments"  # noqa: E501
     )
 
     # Детальний вивід для відлагодження
@@ -2498,6 +2498,4 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.error(f"❌ Failed to start webhook server: {e}")
-        import traceback
-
         logger.error(traceback.format_exc())

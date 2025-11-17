@@ -21,7 +21,7 @@ except ImportError as e:
     print("Please install required packages: pip install -r requirements.txt")
     sys.exit(1)
 
-from config.config import (
+from config.config import (  # noqa: E402
     TELEGRAM_TOKEN,
     SSL_CERT_PATH,
     SSL_KEY_PATH,
@@ -34,7 +34,7 @@ from config.config import (
 os.makedirs("logs", exist_ok=True)
 
 # Налаштування логування з ротацією файлів
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler  # noqa: E402
 
 # Отримуємо root logger
 root_logger = logging.getLogger()
@@ -223,7 +223,6 @@ async def main():
     # Инициализируем переменные
     lock_file = None
     application = None
-    webhook_runner = None
 
     try:
         logger.info("====== Запуск бота ======")
@@ -273,7 +272,7 @@ async def main():
             # Import webhook server setup and start it
             from src.jira_webhooks2 import setup_webhook_server
 
-            webhook_runner = await setup_webhook_server(
+            _ = await setup_webhook_server(
                 application,
                 host=WEBHOOK_HOST,
                 port=int(WEBHOOK_PORT),
@@ -359,7 +358,7 @@ async def main():
             lock_file.close()
             try:
                 os.unlink(LOCK_FILE)
-            except:
+            except OSError:
                 pass
         logger.info("Програма завершена")
 

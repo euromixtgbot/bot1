@@ -7,7 +7,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, cast
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class UserStateManager:
             logger.info(
                 f"Завантажено стан користувача {telegram_id} з файлу {user_file}"
             )
-            return data.get("state", {})
+            return cast(Dict[str, Any], data.get("state", {}))
 
         except Exception as e:
             logger.error(f"Помилка завантаження стану користувача {telegram_id}: {e}")
@@ -114,7 +114,7 @@ class UserStateManager:
                 return None
 
             with open(user_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                return cast(Dict[str, Any], json.load(f))
 
         except Exception as e:
             logger.error(
@@ -156,7 +156,7 @@ def load_user_profile(telegram_id: int) -> Optional[Dict[str, Any]]:
     try:
         state = user_state_manager.load_user_state(telegram_id)
         if state and state.get("type") == "user_profile":
-            return state.get("profile", {})
+            return cast(Dict[str, Any], state.get("profile", {}))
         return None
     except Exception as e:
         logger.error(f"Помилка завантаження профілю користувача {telegram_id}: {e}")
@@ -387,7 +387,7 @@ def get_user_current_task(telegram_id: int) -> str:
     try:
         state = user_state_manager.load_user_state(telegram_id)
         if state and "bot_state" in state:
-            return state["bot_state"].get("current_task_key", "")
+            return str(state["bot_state"].get("current_task_key", ""))
         return ""
     except Exception as e:
         logger.error(

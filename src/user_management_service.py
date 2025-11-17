@@ -5,20 +5,18 @@
 """
 
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-import logging
-from typing import Dict, Any, Optional, Tuple
 from src.google_sheets_service import (
+    GoogleSheetsError,
+    add_new_user,
     find_user_by_phone,
     find_user_by_telegram_id,
     update_user_telegram,
-    add_new_user,
-    GoogleSheetsError,
 )
 from src.user_state_service import (
-    save_user_profile,
     load_user_profile,
+    save_user_profile,
     update_user_sync_status,
     list_all_cached_users,
 )
