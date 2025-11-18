@@ -773,9 +773,9 @@ async def global_contact_handler(update: Update, context: ContextTypes.DEFAULT_T
     telegram_id = int(update.effective_user.id)
     tg_username = update.effective_user.username or ""
 
-    logger.info(f"Глобальна авторизація: отримано номер телефону {phone}")
+    logger.info("Глобальна авторізація: отримано номер телефону")
 
-    # Використовуємо гібридний сервіс для авторизації
+    # Використовуємо гібридний сервіс для авторізації
     user_data, status = await user_manager.authorize_user(telegram_id, phone)
 
     if status == "authorized":
@@ -805,7 +805,7 @@ async def global_contact_handler(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(
             user_info, reply_markup=main_menu_markup, parse_mode="Markdown"
         )
-        logger.info(f"Успішна глобальна авторизація для {user_data['full_name']}")
+        logger.info("Успішна глобальна авторізація користувача")
 
     elif status == "need_registration":
         # Номер не знайдено в базі - переходимо до реєстрації
@@ -828,7 +828,7 @@ async def global_contact_handler(update: Update, context: ContextTypes.DEFAULT_T
         # Зберігаємо стан реєстрації у файл
         save_registration_state(telegram_id, context.user_data["registration"], "name")
 
-        logger.info(f"Почато розширену реєстрацію нового користувача з номером {phone}")
+        logger.info("Почато розширену реєстрацію нового користувача")
 
     else:  # status == 'error'
         # Помилка доступу до баз даних
@@ -859,7 +859,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Сохраняем номер телефона в любом случае для возможного будущего создания пользователя
     context.user_data["mobile_number"] = phone
-    logger.info(f"ConversationHandler: отримано номер телефону {phone}")
+    logger.info("ConversationHandler: отримано номер телефону")
 
     # Шукаємо користувача в Google Sheets
     res = find_user_by_phone(phone)
@@ -2203,7 +2203,7 @@ async def full_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обробка введеного ПІБ для неавторизованого користувача"""
     full_name = update.message.text.strip()
     tg_id = str(update.effective_user.id)
-    logger.info(f"full_name_handler вызван, получено имя: '{full_name}', tg_id={tg_id}")
+    logger.info(f"full_name_handler вызван, tg_id={tg_id}")
 
     # � Встановлюємо флаг активного conversation для блокування інших handlers
     context.user_data["in_conversation"] = True
@@ -2228,7 +2228,7 @@ async def full_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return FULL_NAME
 
     context.user_data["full_name"] = full_name
-    logger.info(f"Збережено ім'я користувача: {full_name}")
+    logger.info("Збережено ім'я користувача")
 
     # Запитуємо номер телефону з чітким повідомленням про обов'язковість авторизації
     await update.message.reply_text(
@@ -3116,7 +3116,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 row_num = add_new_user(new_user_data)
                 logger.info(
-                    f"Новий користувач {new_user_data['full_name']} автоматично додано в Google Sheets: рядок {row_num}"
+                    f"Новий користувач автоматично додано в Google Sheets: рядок {row_num}"
                 )
 
                 # Зберігаємо профіль користувача в контексті для майбутніх взаємодій
