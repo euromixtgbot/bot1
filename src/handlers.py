@@ -922,7 +922,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ЗАВЕРШУЄМО ConversationHandler і переходимо до розширеної реєстрації
         logger.info(
-            f"ConversationHandler: починаємо розширену реєстрацію для номера {phone}"
+            "ConversationHandler: починаємо розширену реєстрацію"
         )
         return ConversationHandler.END
 
